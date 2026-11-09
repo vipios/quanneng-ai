@@ -1486,7 +1486,7 @@
 		FD1A00000000000000000001 /* EdgeDrawer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EdgeDrawer.swift; sourceTree = "<group>"; };
 		FD1A00000000000000000002 /* SessionDrawer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionDrawer.swift; sourceTree = "<group>"; };
 		FD1A00000000000000000003 /* AllArtifactsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AllArtifactsView.swift; sourceTree = "<group>"; };
-		FD1A00000000000000000004 /* ContentView+Drawer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView+Drawer.swift; sourceTree = "<group>"; };
+		FD1A00000000000000000004 /* ContentView+Drawer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ContentView+Drawer.swift"; sourceTree = "<group>"; };
 		FF1A00000000000000000001 /* RouteEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RouteEngine.swift; sourceTree = "<group>"; };
 		FF1A00000000000000000002 /* RouteRules.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RouteRules.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
