@@ -466,7 +466,13 @@ private struct RelayWebContainer: UIViewRepresentable {
         var installedScripts: [WKUserScript] = []
 
         /// 慢加载兜底：连接被黑洞掉时 WKWebView 可能几十秒都不回调 didFail，
-        /// 用户看到的就是「白屏一直转圈」。20 秒没起来就主动报错。
+        /// 用户看到的就是「白屏一直转圈」。超时没起来就主动报错。
+        ///
+        /// 定 30 秒而不是 20 秒：路由器刚重启完那 1 分钟，Cloudflare 隧道
+        /// 在重连（实测冷启动 3.38s，重连期更久）。20 秒刚好卡在边界上，
+        /// 用户会看到「地址不通」以为坏了。30 秒更稳，正常加载根本用不到。
+        private static let slowHintSeconds: TimeInterval = 30
+
         private var slowItem: DispatchWorkItem?
 
         init(parent: RelayWebContainer) {
@@ -476,15 +482,16 @@ private struct RelayWebContainer: UIViewRepresentable {
 
         private func armSlowHint() {
             slowItem?.cancel()
+            let limit = Int(Self.slowHintSeconds)
             let item = DispatchWorkItem { [weak self] in
                 guard let self = self, let wv = self.webView else { return }
                 guard wv.isLoading else { return }
                 wv.stopLoading()
                 self.parent.loading = false
-                self.parent.onLoadFailed?("20 秒没加载出来\n地址不通，或当前网络访问不了它")
+                self.parent.onLoadFailed?("\(limit) 秒没加载出来\n地址不通，或当前网络访问不了它")
             }
             slowItem = item
-            DispatchQueue.main.asyncAfter(deadline: .now() + 20, execute: item)
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.slowHintSeconds, execute: item)
         }
 
         func webView(_ webView: WKWebView,
