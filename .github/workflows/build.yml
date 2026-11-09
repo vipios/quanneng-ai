@@ -1,0 +1,136 @@
+# ============================================================
+# Minis 云端编译兜底 —— GitHub Actions workflow 模板
+#
+# 用途：本机（iSH 沙箱）编不出来的东西，推到 GitHub 上用 macOS runner 编。
+#
+# ⚠️ 使用前必须知道的两件事
+#
+# 1. 这个文件要先提交进**默认分支**，GitHub 才会索引到它。
+#    在那之前，API 的 workflow_dispatch 会返回 404 —— 而且它
+#    和「仓库不存在」的 404 长得一样，极难分辨。所以 App 里
+#    对这一条单独给了错误文案。
+#
+# 2. macOS runner 的免费额度：
+#      · 公开仓库：不限量
+#      · 私有仓库：每月 2000 分钟（macOS 按 10 倍计费，实际约 200 分钟）
+#    一次 iOS 完整构建 10–25 分钟，也就是私有仓库每月只能编 10 来次。
+#    这就是为什么 App 里把「本机优先」做成默认，云端只当兜底。
+# ============================================================
+
+name: Build
+
+on:
+  # 由 App 通过 REST API 触发（POST /actions/workflows/build.yml/dispatches）
+  workflow_dispatch:
+    inputs:
+      target:
+        description: '编译目标（scheme 名，留空用 Release）'
+        required: false
+        default: 'Release'
+      note:
+        description: '这次构建的说明，会写进 artifact 名'
+        required: false
+        default: ''
+
+  # 也可以直接 push 触发（调试 workflow 本身时方便）
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build.yml'
+
+concurrency:
+  # 同一分支只跑一个，新的覆盖旧的 —— 避免排队烧额度
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-ios:
+    name: Build iOS
+    runs-on: macos-14
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # iSH / PRoot 是 submodule，不递归拉会缺文件
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          swift --version || true
+          echo "runner: $(uname -a)"
+
+      - name: Prepare build config
+        run: |
+          # BUILDING.md 里写明这两个文件不入库，要构建前从模板复制
+          if [ -f src/ios/Configs/ProviderCustomization.xcconfig.example ]; then
+            cp src/ios/Configs/ProviderCustomization.xcconfig.example \
+               src/ios/Configs/ProviderCustomization.xcconfig
+          fi
+
+      - name: Build
+        id: build
+        run: |
+          set -o pipefail
+          TARGET="${{ github.event.inputs.target }}"
+          if [ -z "$TARGET" ]; then TARGET="Release"; fi
+
+          # 先列一下 scheme，构建失败时日志里能立刻看出名字对不对
+          xcodebuild -list -project src/ios/Minis.xcodeproj || true
+
+          SCHEME=$(xcodebuild -list -project src/ios/Minis.xcodeproj -json 2>/dev/null \
+            | python3 -c "import sys,json;d=json.load(sys.stdin);p=d.get('project',{});s=p.get('schemes') or [];print(s[0] if s else 'Minis')" 2>/dev/null || echo "Minis")
+          echo "scheme=$SCHEME"
+
+          xcodebuild \
+            -project src/ios/Minis.xcodeproj \
+            -scheme "$SCHEME" \
+            -configuration "$TARGET" \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build 2>&1 | tee build.log
+
+      - name: Collect artifacts
+        if: always()
+        run: |
+          mkdir -p out
+          # 未签名的 .app 打包，用户自己签或走 TrollStore
+          find build -name "*.app" -maxdepth 6 -type d 2>/dev/null | while read app; do
+            name=$(basename "$app")
+            ditto -c -k --sequesterRsrc --keepParent "$app" "out/${name}.zip" || true
+          done
+          # 编译日志也带上 —— 失败时用户能直接下日志看原因
+          cp build.log out/ 2>/dev/null || true
+          ls -la out
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: minis-build-${{ github.run_number }}
+          path: out/
+          retention-days: 7
+          if-no-files-found: warn
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## 构建结果"
+            echo ""
+            echo "- 运行号：${{ github.run_number }}"
+            echo "- 目标：${{ github.event.inputs.target }}"
+            echo "- 说明：${{ github.event.inputs.note }}"
+            echo ""
+            if [ "${{ job.status }}" = "success" ]; then
+              echo "✅ 成功。产物在本次运行的 Artifacts 里。"
+            else
+              echo "❌ 失败。先看 build.log，再往下看「Build」那一步。"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

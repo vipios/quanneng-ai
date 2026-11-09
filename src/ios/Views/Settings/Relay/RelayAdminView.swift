@@ -1,0 +1,594 @@
+//
+//  RelayAdminView.swift
+//  Minis — 中转站后台（WebView）
+//
+//  直接把 relay.py 自带的后台页面装进 App，密码自动注入。
+//
+//  ============================================================
+//  一、密码注入有**两处**，缺一个后台就出不来
+//
+//   ① localStorage['relayKey']
+//      relay.py 的前端自己从 localStorage 取密钥，再拼到每个 fetch 的
+//      X-Access-Key 头上。必须在 .atDocumentStart 注入 —— 等页面跑起来
+//      再注就晚了（首屏那几个请求已经 401，页面渲染成「要输密码」）。
+//
+//   ② fetch / XMLHttpRequest 包一层
+//      兜底：万一页面某处裸 fetch，请求头也带上。
+//
+//  ============================================================
+//  二、左滑滑不动的真正原因（已修，别再改回去）
+//
+//  真正的病灶**不在网页**：relay.py 的表格和顶部菜单都写好了
+//  overflow-x:auto。病灶在这里 ——
+//     web.scrollView.delegate = coordinator      ← 为了支持双指缩放
+//     web.scrollView.minimumZoomScale/maximumZoomScale = 1.0/5.0
+//  一旦把 WKWebView 的内部 scrollView 接管过来，网页里那些
+//  overflow-x:auto 的内联滚动区域（菜单、工具条、账户表格）的横向手势
+//  就被父级 scrollView 抢走，手指横着拖，网页收不到事件。
+//
+//  所以这一版：
+//     ✗ 不设 scrollView.delegate
+//     ✗ 不设 minimumZoomScale / maximumZoomScale
+//     ✗ 不补 viewport meta（页面自带，改了反而破坏适配）
+//     ✓ allowsBackForwardNavigationGestures = false（别抢横向手势）
+//  ============================================================
+
+import SwiftUI
+import WebKit
+
+struct RelayAdminView: View {
+
+    @ObservedObject private var store = RelayStore.shared
+    @State private var loading = false
+    @State private var reloadToken = 0
+    @State private var loadError = ""
+    @State private var showSettings = false
+
+    private var route: RelayRoute? { store.route }
+
+    /// 显式读 vaultRevision 建立依赖。
+    ///
+    /// `RelayVault` 不是 ObservableObject，直接写 `RelayVault.shared.password()`
+    /// 在 body 里是**读不出依赖**的：用户在设置页存了新密码，这个视图
+    /// 不会重算，`updateUIView` 也不执行，注入脚本还是旧的（或者压根没装）。
+    /// 结果就是「设置页说记住了，后台还是要求密钥」。
+    /// 所以每个碰 Vault 的计算属性都先摸一下 vaultRevision。
+    private var password: String {
+        _ = store.vaultRevision
+        return RelayVault.shared.password() ?? ""
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // 密码失效时先给一条能看懂的话，再下面是网页本体。
+            // 不把网页拦掉，避免把「后端临时 401」误判成「密码坏了」。
+            if store.needsPassword {
+                staleKeyBanner
+            }
+
+            ZStack {
+                if let r = route, !password.isEmpty {
+                    RelayWebContainer(
+                        urlString: r.adminBase,
+                        password: password,
+                        reloadToken: reloadToken,
+                        loading: $loading,
+                        onLoadFailed: { msg in loadError = msg },
+                        onLoadOK: { loadError = "" }
+                    )
+                    // 线路切换（在家↔在外）时整个容器换 key，
+                    // 保证 WKWebView 重新按新地址建，而不是带着旧 cookie 复用
+                    .id(r.adminBase)
+                } else {
+                    placeholder
+                }
+
+                if !loadError.isEmpty {
+                    failCard
+                }
+            }
+        }
+        .background(Color(.systemGroupedBackground))
+        .navigationTitle("中转站")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                HStack(spacing: 14) {
+                    if loading {
+                        ProgressView().scaleEffect(0.8)
+                    }
+                    Button {
+                        retry()
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
+                    }
+                    Button {
+                        showSettings = true
+                    } label: {
+                        Image(systemName: "gearshape")
+                    }
+                }
+            }
+        }
+        .sheet(isPresented: $showSettings) {
+            NavigationStack {
+                RelaySettingsView()
+            }
+        }
+        .onAppear { store.refreshIfStale() }
+        .onChange(of: store.route?.adminBase) { _ in
+            // 线路变了 → 清掉上次的失败态，让新地址自己尝试
+            loadError = ""
+            reloadToken += 1
+        }
+        .onChange(of: store.vaultRevision) { _ in
+            // 密码在别处被改了。必须强制建新容器：
+            //   · 只改 updateUIView 里的注入脚本，已经在跑的那一页
+            //     仍然用旧 key 渲染出来的（首屏 401 已经发完）。
+            //   · 而 WKWebView 的 userContentController 是建时就绑定的，
+            //     换脚本后不重载页面等于没换。
+            // 直接 reloadToken += 1 走「重新 load」那条既有路径，
+            // 同时把 loadError 清掉，别让上次的超时提示挡住新页面。
+            loadError = ""
+            reloadToken += 1
+        }
+        .onReceive(NotificationCenter.default.publisher(
+            for: UIApplication.didBecomeActiveNotification)) { _ in
+            store.refreshIfStale()
+        }
+    }
+
+    private var placeholder: some View {
+        VStack(spacing: 14) {
+            if route == nil {
+                ProgressView()
+                Text("正在判定线路…")
+                    .font(.footnote)
+                    .foregroundColor(.secondary)
+            } else {
+                Image(systemName: "key.slash")
+                    .font(.system(size: 34))
+                    .foregroundColor(.secondary)
+                Text("还没有后台密码")
+                    .font(.subheadline.weight(.medium))
+                Text("填一次就会加密存在这台手机上，以后不用再输。")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 40)
+                Button {
+                    showSettings = true
+                } label: {
+                    Text("去设置")
+                        .font(.footnote.weight(.medium))
+                        .padding(.horizontal, 22)
+                        .padding(.vertical, 9)
+                        .background(Color.accentColor.opacity(0.12))
+                        .foregroundColor(.accentColor)
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color(.systemGroupedBackground))
+    }
+
+    private var failCard: some View {
+        VStack(spacing: 14) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 34))
+                .foregroundColor(.orange)
+
+            Text(loadError)
+                .font(.footnote)
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Text(route?.displayAddress ?? "—")
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundColor(.secondary.opacity(0.8))
+                .lineLimit(1)
+                .truncationMode(.middle)
+
+            HStack(spacing: 12) {
+                Button("重试") { retry() }
+                Button("线路设置") { showSettings = true }
+            }
+            .font(.footnote.weight(.medium))
+        }
+        .padding(22)
+        .background(Color(.systemGroupedBackground))
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func retry() {
+        loadError = ""
+        // 顺手重判一次线路（可能换了网络）
+        store.refreshIfStale()
+        reloadToken += 1
+    }
+
+    /// 密码失效（refresh 两条线路都 401）时的横幅。
+    ///
+    /// 不拦着网页不加载：万一只是后端瞬时抽风，用户还能看到页面。
+    /// 但必须给一条「为什么进去是空的、去哪改」的话 ——
+    /// relay.py 前端自己只会 toast 一句「需要访问密钥」，不告诉你怎么修。
+    private var staleKeyBanner: some View {
+        VStack(spacing: 0) {
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: "key.slash.fill")
+                    .font(.system(size: 13))
+                    .foregroundColor(.orange)
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("后台密码可能已经不对了")
+                        .font(.footnote.weight(.medium))
+                    Text(store.errorText.isEmpty
+                         ? "重新填一次就会记住，之后不用再输。"
+                         : store.errorText)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button("重新填密码") { showSettings = true }
+                        .font(.caption.weight(.medium))
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(12)
+            .background(Color.orange.opacity(0.10))
+        }
+    }
+}
+
+// MARK: - WKWebView 包装
+
+private struct RelayWebContainer: UIViewRepresentable {
+
+    let urlString: String
+    let password: String
+    let reloadToken: Int
+    @Binding var loading: Bool
+    var onLoadFailed: ((String) -> Void)?
+    var onLoadOK: (() -> Void)?
+
+    func makeUIView(context: Context) -> WKWebView {
+        let cfg = WKWebViewConfiguration()
+        cfg.allowsInlineMediaPlayback = true
+        cfg.websiteDataStore = .default()
+        cfg.preferences.javaScriptCanOpenWindowsAutomatically = false
+
+        if !password.isEmpty {
+            for script in Self.injectionScripts(password, origin: Self.origin(of: urlString)) {
+                let s = WKUserScript(source: script,
+                                     injectionTime: .atDocumentStart,
+                                     forMainFrameOnly: false)
+                cfg.userContentController.addUserScript(s)
+                // 记下来，密码变更时要摘掉旧的
+                context.coordinator.installedScripts.append(s)
+            }
+        }
+
+        let web = WKWebView(frame: .zero, configuration: cfg)
+        web.navigationDelegate = context.coordinator
+
+        // ⚠️⚠️ 左滑的关键：**不要接管 scrollView**。
+        //   不设 delegate、不设 zoomScale。
+        //   设了就会抢走网页内 overflow-x:auto 容器的横向手势，
+        //   表现就是「表格右半边怎么划都看不到」。
+        web.allowsBackForwardNavigationGestures = false
+        web.scrollView.bounces = true
+        web.scrollView.alwaysBounceVertical = true
+
+        web.isOpaque = false
+        web.backgroundColor = .systemGroupedBackground
+        web.scrollView.backgroundColor = .systemGroupedBackground
+        // .never：让网页自己管 inset，避免系统反复插入导致上下跳动
+        web.scrollView.contentInsetAdjustmentBehavior = .never
+
+        context.coordinator.webView = web
+        context.coordinator.lastLoaded = urlString
+        context.coordinator.lastPassword = password
+        context.coordinator.lastToken = reloadToken
+
+        if let url = URL(string: urlString) {
+            var req = URLRequest(url: url)
+            req.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+            web.load(req)
+        }
+        return web
+    }
+
+    func updateUIView(_ uiView: WKWebView, context: Context) {
+        // Coordinator 存的是创建那一刻的结构体副本，回调会变旧，每次更新刷新它
+        context.coordinator.parent = self
+
+        // ① 用户点了刷新 / 线路变了
+        if reloadToken != context.coordinator.lastToken {
+            context.coordinator.lastToken = reloadToken
+            context.coordinator.lastLoaded = urlString
+            if let url = URL(string: urlString) {
+                var req = URLRequest(url: url)
+                req.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+                uiView.load(req)
+            } else {
+                uiView.reload()
+            }
+            return
+        }
+
+        // ② 密码改了 → 补注入脚本再重载。
+        //
+        // 不能只 evaluateJavaScript 补 localStorage：
+        //   · makeUIView 时如果还没密码，userContentController 里根本
+        //     没装注入脚本 —— 之后用户去设置页填了密码回来，
+        //     atDocumentStart 那两段永远不会执行，页面一刷新又是空 key。
+        //   · 表现就是「明明填过密码，进后台还要再输一遍」。
+        // 所以密码变化时要把脚本**补进控制器**，再重载。
+        if password != context.coordinator.lastPassword {
+            context.coordinator.lastPassword = password
+            if password.isEmpty {
+                return
+            }
+
+            // 先摘掉旧的（可能换了密码），再装新的，避免叠多份。
+            // 由 Coordinator 记住装了哪些，因为 struct 是值类型，
+            // 每次 updateUIView 都是新的副本，不能自己存状态。
+            let ucc = uiView.configuration.userContentController
+            context.coordinator.installedScripts.forEach { ucc.removeUserScript($0) }
+            context.coordinator.installedScripts = []
+            for src in Self.injectionScripts(password, origin: Self.origin(of: urlString)) {
+                let s = WKUserScript(source: src,
+                                     injectionTime: .atDocumentStart,
+                                     forMainFrameOnly: false)
+                ucc.addUserScript(s)
+                context.coordinator.installedScripts.append(s)
+            }
+
+            // 当前这一页已经用空 key 载入过了，补一次并重载让注入生效
+            uiView.evaluateJavaScript(
+                "try{localStorage.setItem('relayKey',\(jsStringLiteral(password)))}catch(e){}",
+                completionHandler: nil)
+            uiView.reload()
+            return
+        }
+
+        // ③ 地址变了 → 重新加载到新地址。
+        //
+        // 判据必须用 lastLoaded（上次真正加载的地址），不能用 uiView.url：
+        // 首次渲染时 uiView.url 还是 nil，拿它比永远不等，会把刚发出的
+        // 那次 load 再发一遍 —— 网页被加载两次。
+        guard urlString != context.coordinator.lastLoaded else { return }
+        guard let url = URL(string: urlString) else { return }
+        context.coordinator.lastLoaded = urlString
+        var req = URLRequest(url: url)
+        req.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+        uiView.load(req)
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(parent: self)
+    }
+
+    /// 从 base URL 取 origin（`scheme://host[:port]`），给注入脚本做同源闸。
+    ///
+    /// 不能用 `URL(string:).absoluteString` 或 host 简单拼：`URL.port` 与
+    /// `URL.scheme` 都要参与，否则 `http://h:8080` 和 `https://h` 会被算成
+    /// 同一个 origin，而浏览器的 `location.origin` 是带端口的 —— 判等永远不成立，
+    /// 脚本就成了死代码，密钥又注入到所有帧。
+    static func origin(of urlString: String) -> String {
+        guard let u = URL(string: urlString),
+              let scheme = u.scheme?.lowercased(),
+              let host = u.host, !host.isEmpty else { return "" }
+        let defaultPort = scheme == "https" ? 443 : 80
+        if let p = u.port, p != defaultPort {
+            return "\(scheme)://\(host):\(p)"
+        }
+        return "\(scheme)://\(host)"
+    }
+
+    /// 两段注入脚本：localStorage 优先，请求头兜底。
+    /// 顺序不能反 —— localStorage 必须第一条，页面首屏请求就靠它。
+    ///
+    /// ⚠️ 两段都先判 `location.origin`：
+    ///   `forMainFrameOnly: false` 是必须的（后台可能用同源 iframe 装内容），
+    ///   但它同时会把脚本注入**所有**子帧 —— 包括第三方 iframe。
+    ///   不判来源的话，任何嵌进来的外部页面都会被我们改写 `fetch`，
+    ///   于是 `X-Access-Key` 就跟着它的请求发出去了 —— 后台密码直接泄给第三方。
+    ///   所以脚本第一句就是 `if (location.origin !== <本页 origin>) return;`。
+    static func injectionScripts(_ password: String, origin: String) -> [String] {
+        let guardJS = """
+          // 只在本站帧里生效；跨域子帧原样跳过，绝不把密钥带出去
+          if (location.origin !== \(jsStringLiteral(origin))) return;
+        """
+
+        let keyJS = """
+        (function(){
+        \(guardJS)
+          try {
+            var K = \(jsStringLiteral(password));
+            if (localStorage.getItem('relayKey') !== K) {
+              localStorage.setItem('relayKey', K);
+            }
+          } catch(e) {}
+        })();
+        """
+
+        let headerJS = """
+        (function(){
+        \(guardJS)
+          var K = \(jsStringLiteral(password));
+          if (window.__minisRelayKeyInstalled) return;
+          window.__minisRelayKeyInstalled = true;
+
+          var origFetch = window.fetch;
+          if (origFetch) {
+            window.fetch = function(input, init) {
+              init = init || {};
+              try {
+                var h = new Headers(init.headers || {});
+                if (!h.has('X-Access-Key')) h.set('X-Access-Key', K);
+                init.headers = h;
+              } catch(e) {}
+              return origFetch(input, init);
+            };
+          }
+
+          var origOpen = XMLHttpRequest.prototype.open;
+          var origSend = XMLHttpRequest.prototype.send;
+          XMLHttpRequest.prototype.open = function(m, u) {
+            this.__minisUrl = u;
+            return origOpen.apply(this, arguments);
+          };
+          XMLHttpRequest.prototype.send = function(body) {
+            try {
+              if (!this.__minisKey) {
+                this.setRequestHeader('X-Access-Key', K);
+                this.__minisKey = 1;
+              }
+            } catch(e) {}
+            return origSend.apply(this, arguments);
+          };
+        })();
+        """
+
+        return [keyJS, headerJS]
+    }
+
+    final class Coordinator: NSObject, WKNavigationDelegate {
+        var parent: RelayWebContainer
+        weak var webView: WKWebView?
+        var lastToken: Int = 0
+        var lastLoaded = ""
+        var lastPassword = ""
+        /// 当前已装进 userContentController 的注入脚本。
+        /// 密码变更时要先摘掉这些，否则会叠成两份。
+        var installedScripts: [WKUserScript] = []
+
+        /// 慢加载兜底：连接被黑洞掉时 WKWebView 可能几十秒都不回调 didFail，
+        /// 用户看到的就是「白屏一直转圈」。20 秒没起来就主动报错。
+        private var slowItem: DispatchWorkItem?
+
+        init(parent: RelayWebContainer) {
+            self.parent = parent
+            self.lastToken = parent.reloadToken
+        }
+
+        private func armSlowHint() {
+            slowItem?.cancel()
+            let item = DispatchWorkItem { [weak self] in
+                guard let self = self, let wv = self.webView else { return }
+                guard wv.isLoading else { return }
+                wv.stopLoading()
+                self.parent.loading = false
+                self.parent.onLoadFailed?("20 秒没加载出来\n地址不通，或当前网络访问不了它")
+            }
+            slowItem = item
+            DispatchQueue.main.asyncAfter(deadline: .now() + 20, execute: item)
+        }
+
+        func webView(_ webView: WKWebView,
+                     didStartProvisionalNavigation navigation: WKNavigation!) {
+            parent.loading = true
+            armSlowHint()
+        }
+
+        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            slowItem?.cancel()
+            parent.loading = false
+            parent.onLoadOK?()
+
+            // 有些页面会自己清 key，或二次进入时内存里的丢了，这里补一次
+            let p = parent.password
+            if !p.isEmpty {
+                webView.evaluateJavaScript(
+                    "try{localStorage.setItem('relayKey',\(jsStringLiteral(p)))}catch(e){}",
+                    completionHandler: nil)
+            }
+        }
+
+        func webView(_ webView: WKWebView, didFail navigation: WKNavigation!,
+                     withError error: Error) {
+            slowItem?.cancel()
+            parent.loading = false
+            let ns = error as NSError
+            if ns.code == NSURLErrorCancelled { return }
+            parent.onLoadFailed?(RelayWebError.explain(error, addr: parent.urlString))
+        }
+
+        func webView(_ webView: WKWebView,
+                     didFailProvisionalNavigation navigation: WKNavigation!,
+                     withError error: Error) {
+            slowItem?.cancel()
+            parent.loading = false
+            let ns = error as NSError
+            if ns.code == NSURLErrorCancelled { return }
+            parent.onLoadFailed?(RelayWebError.explain(error, addr: parent.urlString))
+        }
+
+        /// 网页内容进程被系统干掉（内存不足等）
+        func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+            slowItem?.cancel()
+            parent.loading = false
+            parent.onLoadFailed?("网页进程被系统结束了。点重试即可恢复。")
+        }
+    }
+}
+
+// MARK: - 错误翻译
+
+/// 把 NSURLError 翻译成「用户照着能动手」的一句话，
+/// 而不是系统的 "A server with the specified hostname could not be found."
+private enum RelayWebError {
+    static func explain(_ error: Error, addr: String) -> String {
+        let ns = error as NSError
+        let host = URL(string: addr)?.host ?? addr
+        if ns.domain == NSURLErrorDomain {
+            switch ns.code {
+            case NSURLErrorCannotFindHost, NSURLErrorDNSLookupFailed:
+                return "域名解析不到：\(host)\n可能域名当前解析不了，或网络被拦"
+            case NSURLErrorCannotConnectToHost:
+                return "能解析但连不上：\(host)\n后台可能没启动，或端口不对"
+            case NSURLErrorTimedOut:
+                return "连接超时：\(host)\n地址不通，或当前网络访问不了它"
+            case NSURLErrorSecureConnectionFailed,
+                 NSURLErrorServerCertificateUntrusted,
+                 NSURLErrorServerCertificateHasBadDate,
+                 NSURLErrorServerCertificateNotYetValid:
+                return "证书有问题：\(host)\n地址对但 HTTPS 证书不受信任"
+            case NSURLErrorNotConnectedToInternet:
+                return "当前没有网络连接"
+            case NSURLErrorNetworkConnectionLost:
+                return "连接被中断，请重试"
+            case NSURLErrorAppTransportSecurityRequiresSecureConnection:
+                return "系统拦截了这次明文 HTTP 请求（ATS）"
+            default:
+                break
+            }
+        }
+        let msg = ns.localizedDescription
+        return msg.isEmpty ? "打不开 \(host)" : "打不开 \(host)\n\(msg)"
+    }
+}
+
+/// 把 Swift 字符串安全地写成 JS 字面量。
+/// 密码里出现引号/反斜杠是常事，直接拼进源码会把脚本写坏。
+private func jsStringLiteral(_ s: String) -> String {
+    var out = "\""
+    for c in s {
+        switch c {
+        case "\\": out += "\\\\"
+        case "\"": out += "\\\""
+        case "\n": out += "\\n"
+        case "\r": out += "\\r"
+        case "\t": out += "\\t"
+        default:
+            if let ascii = c.asciiValue, ascii < 0x20 {
+                out += String(format: "\\u%04x", Int(ascii))
+            } else {
+                out.append(c)
+            }
+        }
+    }
+    return out + "\""
+}
