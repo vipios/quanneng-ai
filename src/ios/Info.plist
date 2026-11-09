@@ -4,8 +4,8 @@
 <dict>
 	<key>BGTaskSchedulerPermittedIdentifiers</key>
 	<array>
-		<string>com.openminis.app.liveactivity-refresh</string>
-		<string>com.openminis.app.continued.*</string>
+		<string>com.vipios.app.liveactivity-refresh</string>
+		<string>com.vipios.app.continued.*</string>
 	</array>
 	<key>CFBundleDocumentTypes</key>
 	<array>
@@ -30,7 +30,7 @@
 			<string>Owner</string>
 			<key>LSItemContentTypes</key>
 			<array>
-				<string>com.openminis.app.minisbak</string>
+				<string>com.vipios.app.minisbak</string>
 			</array>
 		</dict>
 	</array>
@@ -164,7 +164,7 @@
 			<string>Claude OAuth Callback</string>
 			<key>CFBundleURLSchemes</key>
 			<array>
-				<string>com.openminis.app</string>
+				<string>com.vipios.app</string>
 			</array>
 		</dict>
 		<dict>
@@ -261,7 +261,7 @@
 			<key>UTTypeDescription</key>
 			<string>Minis Backup</string>
 			<key>UTTypeIdentifier</key>
-			<string>com.openminis.app.minisbak</string>
+			<string>com.vipios.app.minisbak</string>
 			<key>UTTypeTagSpecification</key>
 			<dict>
 				<key>public.filename-extension</key>

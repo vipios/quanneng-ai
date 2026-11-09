@@ -3620,7 +3620,7 @@ enum ProviderKeychainHelper {
     }
 
     static func saveAPIKey(_ key: String, instanceId: String, caller: String = #function) {
-        let service = "com.openminis.app.provider.\(instanceId)"
+        let service = "com.vipios.app.provider.\(instanceId)"
         // Delete both legacy (non-sync) and synchronizable entries
         let deleteQuery: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
@@ -3645,7 +3645,7 @@ enum ProviderKeychainHelper {
     }
 
     static func loadAPIKey(instanceId: String, caller: String = #function) -> String? {
-        let service = "com.openminis.app.provider.\(instanceId)"
+        let service = "com.vipios.app.provider.\(instanceId)"
         // Try synchronizable first, then fallback to legacy
         let syncQuery: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
@@ -3702,7 +3702,7 @@ enum ProviderKeychainHelper {
     }
 
     static func deleteAPIKey(instanceId: String, caller: String = #function) {
-        let service = "com.openminis.app.provider.\(instanceId)"
+        let service = "com.vipios.app.provider.\(instanceId)"
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -3739,7 +3739,7 @@ enum ProviderKeychainHelper {
     /// read/write the exact same Keychain item as the typed
     /// `saveOAuthToken`/`loadOAuthToken` pair.
     static func saveRawOAuthToken(_ data: Data, instanceId: String) {
-        let service = "com.openminis.app.provider.\(instanceId)"
+        let service = "com.vipios.app.provider.\(instanceId)"
         let acct = "oauth-token"
         let deleteQuery: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
@@ -3762,7 +3762,7 @@ enum ProviderKeychainHelper {
     }
 
     static func loadRawOAuthToken(instanceId: String) -> Data? {
-        let service = "com.openminis.app.provider.\(instanceId)"
+        let service = "com.vipios.app.provider.\(instanceId)"
         var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -3781,7 +3781,7 @@ enum ProviderKeychainHelper {
             AppLogger(category: "Keychain").warning("write oauthToken instanceId=\(instanceId.prefix(8)) ENCODE FAILED caller=\(caller)")
             return
         }
-        let service = "com.openminis.app.provider.\(instanceId)"
+        let service = "com.vipios.app.provider.\(instanceId)"
         let acct = "oauth-token"
         let deleteQuery: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
@@ -3803,7 +3803,7 @@ enum ProviderKeychainHelper {
     }
 
     static func loadOAuthToken<T: Codable>(instanceId: String, as type: T.Type, caller: String = #function) -> T? {
-        let service = "com.openminis.app.provider.\(instanceId)"
+        let service = "com.vipios.app.provider.\(instanceId)"
         let acct = "oauth-token"
         // Try synchronizable first
         let syncQuery: [String: Any] = [
@@ -3852,7 +3852,7 @@ enum ProviderKeychainHelper {
     }
 
     static func deleteOAuthToken(instanceId: String, caller: String = #function) {
-        let service = "com.openminis.app.provider.\(instanceId)"
+        let service = "com.vipios.app.provider.\(instanceId)"
         let acct = "oauth-token"
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
@@ -3928,7 +3928,7 @@ enum ProviderKeychainHelper {
     // MARK: - OAuth Strings (per-instance, e.g. email, project ID)
 
     static func saveOAuthString(_ value: String, instanceId: String, account: String, caller: String = #function) {
-        let service = "com.openminis.app.provider.\(instanceId)"
+        let service = "com.vipios.app.provider.\(instanceId)"
         let deleteQuery: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -3948,7 +3948,7 @@ enum ProviderKeychainHelper {
     }
 
     static func loadOAuthString(instanceId: String, account: String, caller: String = #function) -> String? {
-        let service = "com.openminis.app.provider.\(instanceId)"
+        let service = "com.vipios.app.provider.\(instanceId)"
         // Try synchronizable first
         let syncQuery: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
@@ -3990,7 +3990,7 @@ enum ProviderKeychainHelper {
     }
 
     static func deleteOAuthString(instanceId: String, account: String, caller: String = #function) {
-        let service = "com.openminis.app.provider.\(instanceId)"
+        let service = "com.vipios.app.provider.\(instanceId)"
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,

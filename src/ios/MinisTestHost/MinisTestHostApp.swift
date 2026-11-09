@@ -4,7 +4,7 @@
 //
 //  [T-ios-unit-test-infra] Why this exists: MinisTests used to be hosted by
 //  Minis.app itself (TEST_HOST = Minis.app/Minis). Running it on a Mac
-//  ("Designed for iPad") launched the real app under com.openminis.app, in the
+//  ("Designed for iPad") launched the real app under com.vipios.app, in the
 //  real ~/Library/Containers/<uuid> and App Group, and rewrote real data
 //  (2026-10-04 08:30). This host has its own bundle id
 //  (com.openminis.MinisTestHost), so the system gives it its own container. It
