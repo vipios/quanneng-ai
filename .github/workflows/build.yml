@@ -1,136 +1,298 @@
 # ============================================================
-# Minis 云端编译兜底 —— GitHub Actions workflow 模板
+# 全能AI · iOS 出包 workflow
 #
-# 用途：本机（iSH 沙箱）编不出来的东西，推到 GitHub 上用 macOS runner 编。
+# 这个文件解决三件在真机上验证过会失败的事，逐条写清楚，免得以后
+# 有人「顺手改回去」又踩一遍：
 #
-# ⚠️ 使用前必须知道的两件事
+# 1. runner 必须是 macos-26
+#    主 App target 的 IPHONEOS_DEPLOYMENT_TARGET 是 26.2，必须用
+#    iOS 26.2 及以上的 SDK 编。macos-14 自带 Xcode 15/16，SDK 里
+#    根本没有 iphoneos26.2，一编就报 "building for iOS 26.2, but the
+#    SDK is 18.x"。macos-26 自带 Xcode 26.6（默认）+ iOS 26.2 SDK。
 #
-# 1. 这个文件要先提交进**默认分支**，GitHub 才会索引到它。
-#    在那之前，API 的 workflow_dispatch 会返回 404 —— 而且它
-#    和「仓库不存在」的 404 长得一样，极难分辨。所以 App 里
-#    对这一条单独给了错误文案。
+# 2. 原生依赖必须先编，不能跳过
+#    Xcode 工程按相对路径引用 deps/libs、deps/include、deps/frameworks、
+#    deps/resources。这四样都不在仓库里（都是 .gitignore 掉的构建产物），
+#    clone 下来是空的。不先跑 deps/ 下的脚本，链接阶段必然一堆
+#    undefined symbol。顺序不能调：FFmpeg 链 LAME，所以 LAME 先。
 #
-# 2. macOS runner 的免费额度：
-#      · 公开仓库：不限量
-#      · 私有仓库：每月 2000 分钟（macOS 按 10 倍计费，实际约 200 分钟）
-#    一次 iOS 完整构建 10–25 分钟，也就是私有仓库每月只能编 10 来次。
-#    这就是为什么 App 里把「本机优先」做成默认，云端只当兜底。
+# 3. 必须用 iPhoneOS 26.2 的 SDK，且不能有 CRLF
+#    .gitattributes 已经把 .sh/.swift/.pbxproj 全锁成 LF。Windows 上
+#    core.autocrlf=true 检出的 CRLF 会让 shebang 变 `#!/bin/sh^M`。
+#
+# 产物说明：
+#    workflow 用 CODE_SIGNING_ALLOWED=NO 编，产出**未签名**的 .app。
+#    这不能直装到 iPhone —— iOS 要求可执行文件有有效签名。
+#    自用装机路径：TrollStore 或自签（AltStore/Sideloadly/企业证书）。
+#    要出真正可安装的 ipa，需要证书 + provisioning profile，那属于
+#    签名环节，不在这里做。
 # ============================================================
 
-name: Build
+name: Build iOS
 
 on:
-  # 由 App 通过 REST API 触发（POST /actions/workflows/build.yml/dispatches）
   workflow_dispatch:
     inputs:
-      target:
-        description: '编译目标（scheme 名，留空用 Release）'
-        required: false
-        default: 'Release'
+      configuration:
+        description: '编译配置'
+        required: true
+        type: choice
+        options: [Release, Debug]
+        default: Release
       note:
-        description: '这次构建的说明，会写进 artifact 名'
+        description: '说明（会写进 artifact 名和 Summary）'
         required: false
         default: ''
 
-  # 也可以直接 push 触发（调试 workflow 本身时方便）
   push:
     branches: [main]
     paths:
       - '.github/workflows/build.yml'
 
+# 同一分支只跑一个，新的顶掉旧的 —— macOS runner 按 10 倍计费，
+# 排队跑两份等于白烧额度
 concurrency:
-  # 同一分支只跑一个，新的覆盖旧的 —— 避免排队烧额度
   group: build-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   build-ios:
-    name: Build iOS
-    runs-on: macos-14
-    timeout-minutes: 60
+    name: Build iOS (${{ inputs.configuration || 'Release' }})
+    runs-on: macos-26
+    timeout-minutes: 120
+
+    env:
+      # 用固定的 DerivedData 路径，后面缓存和产物收集都认这个
+      DERIVED: ${{ github.workspace }}/build
+      CONFIG: ${{ inputs.configuration || 'Release' }}
+      # 关掉 Swift 的显式模块构建，CI 上偶发 OOM
+      SWIFT_ENABLE_EXPLICIT_MODULES: NO
 
     steps:
+      # ── 0. 打印环境，失败时日志第一段就能定位是不是环境问题 ──
+      - name: Environment
+        run: |
+          set -x
+          sw_vers
+          uname -m
+          xcodebuild -version
+          xcode-select -p
+          echo "--- runtimes ---"
+          xcrun --sdk iphoneos --show-sdk-version
+          xcrun --sdk iphoneos --show-sdk-path
+          echo "--- disk ---"
+          df -h /
+
+      # ── 1. 拉代码（含子模块）──
+      # deps/ish 和 deps/proot 是 gitlink，必须 recursive，否则拿到空目录
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          # iSH / PRoot 是 submodule，不递归拉会缺文件
           submodules: recursive
           fetch-depth: 1
+          # 子模块在上游公共仓库，用默认 token 就够
+          token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Show toolchain
+      - name: Verify submodules
         run: |
-          xcodebuild -version
-          swift --version || true
-          echo "runner: $(uname -a)"
+          # 这两个目录空了说明 submodules 没拉到，后面 build_ish.sh 会挂
+          for d in deps/ish deps/proot; do
+            n=$(ls -A "$d" 2>/dev/null | wc -l | tr -d ' ')
+            echo "$d: $n entries"
+            if [ "$n" = "0" ]; then
+              echo "::error::$d 是空的，submodule 没拉到。检查 .gitmodules 与上游仓库是否可达。"
+              exit 1
+            fi
+          done
 
+      # ── 2. 装工具链 ──
+      # runner 预装了 Xcode 26.6 和 ninja，但 Go / meson / libarchive /
+      # pkg-config 没有，必须自己装。llvm 用来编 iSH 的 guest VDSO。
+      - name: Install toolchain
+        run: |
+          brew install --quiet go meson libarchive pkg-config llvm ninja
+          echo "$(brew --prefix go)/bin" >> "$GITHUB_PATH"
+          echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
+          # meson 装到 brew 的 python 里，确保 PATH 能找到
+          echo "$(brew --prefix)/bin" >> "$GITHUB_PATH"
+
+      - name: Verify toolchain
+        run: |
+          go version
+          meson --version
+          ninja --version
+          echo "llvm: $(brew --prefix llvm)"
+          xcrun -sdk iphoneos metal --version || {
+            echo "::warning::Metal 工具链缺失，FFmpeg 会静默丢掉 yadif_videotoolbox 滤镜"
+          }
+
+      # ── 3. 原生依赖缓存 ──
+      # 这一套全量编译要 30–50 分钟，不改 deps/ 就没必要重编。
+      # key 里带脚本和子模块的 hash，脚本一改自动失效。
+      - name: Compute deps cache key
+        id: depskey
+        run: |
+          H1=$(find deps -maxdepth 2 -name 'build_*.sh' -o -maxdepth 2 -name 'prepare_*.sh' | sort | xargs cat 2>/dev/null | shasum -a 256 | cut -d' ' -f1)
+          H2=$(git ls-tree HEAD deps/ | grep -E '160000' | shasum -a 256 | cut -d' ' -f1)
+          H3=$(cat deps/build_ffmpeg.sh 2>/dev/null | shasum -a 256 | cut -d' ' -f1)
+          echo "key=deps-$H1-$H2-$H3" >> "$GITHUB_OUTPUT"
+          echo "computed: deps-$H1-$H2-$H3"
+
+      - name: Restore native deps
+        id: depscache
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps/libs
+            deps/include
+            deps/frameworks
+            deps/resources
+            deps/lame-build
+          key: ${{ steps.depskey.outputs.key }}
+
+      # ── 4. 构建原生依赖 ──
+      # 顺序有依赖关系，不能并行也不能调换：
+      #   LAME  →  FFmpeg 要用它编 libmp3lame，没有就静默丢 MP3
+      #   iSH   →  产出 libish*.a + headers + VDSO
+      #   rootfs→  Alpine，转成 iSH 的 fakefs
+      #   rclone→  只要 Go，但要在 FFmpeg 之后（互不依赖，放最后统一收尾）
+      - name: Build LAME
+        if: steps.depscache.outputs.cache-hit != 'true'
+        run: |
+          chmod +x deps/*.sh
+          ./deps/build_lame.sh
+
+      - name: Build FFmpeg
+        if: steps.depscache.outputs.cache-hit != 'true'
+        run: ./deps/build_ffmpeg.sh
+
+      - name: Build iSH
+        if: steps.depscache.outputs.cache-hit != 'true'
+        run: ./deps/build_ish.sh
+
+      - name: Prepare Alpine rootfs
+        if: steps.depscache.outputs.cache-hit != 'true'
+        run: ./deps/prepare_alpine_rootfs.sh
+
+      - name: Build rclone
+        if: steps.depscache.outputs.cache-hit != 'true'
+        run: ./deps/build_rclone_ios.sh
+
+      - name: Verify native deps
+        run: |
+          fail=0
+          check() {
+            if [ -e "$1" ]; then echo "OK   $1"; else echo "MISS $1"; fail=1; fi
+          }
+          check deps/include
+          check deps/libs
+          check deps/frameworks
+          check deps/resources/alpine-rootfs.zip
+          check deps/frameworks/FFmpeg.xcframework
+          check deps/frameworks/Rclone.xcframework
+          if [ "$fail" != "0" ]; then
+            echo "::error::原生依赖不完整，继续编只会得到一堆 undefined symbol。"
+            exit 1
+          fi
+          du -sh deps/libs deps/include deps/frameworks deps/resources
+
+      # ── 5. 生成构建期配置文件 ──
+      # BUILDING.md 明确写了这两个文件不入库，构建前从 .example 复制。
+      # 留空也能编 —— 只有用到对应功能的路径才需要在运行时补值。
       - name: Prepare build config
         run: |
-          # BUILDING.md 里写明这两个文件不入库，要构建前从模板复制
-          if [ -f src/ios/Configs/ProviderCustomization.xcconfig.example ]; then
-            cp src/ios/Configs/ProviderCustomization.xcconfig.example \
-               src/ios/Configs/ProviderCustomization.xcconfig
-          fi
+          cp -v src/ios/Configs/ProviderCustomization.xcconfig.example \
+                src/ios/Configs/ProviderCustomization.xcconfig || true
+          ls -la src/ios/Configs/
+
+      # ── 6. 编译 ──
+      - name: Resolve Swift packages
+        run: |
+          xcodebuild -resolvePackageDependencies \
+            -project src/ios/Minis.xcodeproj \
+            -scheme Minis \
+            -derivedDataPath "$DERIVED" 2>&1 | tail -40
 
       - name: Build
         id: build
         run: |
           set -o pipefail
-          TARGET="${{ github.event.inputs.target }}"
-          if [ -z "$TARGET" ]; then TARGET="Release"; fi
-
-          # 先列一下 scheme，构建失败时日志里能立刻看出名字对不对
-          xcodebuild -list -project src/ios/Minis.xcodeproj || true
-
-          SCHEME=$(xcodebuild -list -project src/ios/Minis.xcodeproj -json 2>/dev/null \
-            | python3 -c "import sys,json;d=json.load(sys.stdin);p=d.get('project',{});s=p.get('schemes') or [];print(s[0] if s else 'Minis')" 2>/dev/null || echo "Minis")
-          echo "scheme=$SCHEME"
-
           xcodebuild \
             -project src/ios/Minis.xcodeproj \
-            -scheme "$SCHEME" \
-            -configuration "$TARGET" \
+            -scheme Minis \
+            -configuration "$CONFIG" \
             -sdk iphoneos \
-            -derivedDataPath build \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$DERIVED" \
+            -allowProvisioningUpdates NO \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
-            build 2>&1 | tee build.log
+            CODE_SIGN_ENTITLEMENTS="" \
+            ENABLE_BITCODE=NO \
+            build 2>&1 | tee build.log | tail -80
 
+      # ── 7. 收集产物 ──
       - name: Collect artifacts
         if: always()
         run: |
           mkdir -p out
-          # 未签名的 .app 打包，用户自己签或走 TrollStore
-          find build -name "*.app" -maxdepth 6 -type d 2>/dev/null | while read app; do
-            name=$(basename "$app")
-            ditto -c -k --sequesterRsrc --keepParent "$app" "out/${name}.zip" || true
-          done
-          # 编译日志也带上 —— 失败时用户能直接下日志看原因
+          APP=$(find "$DERIVED/Build/Products" -maxdepth 3 -name "*.app" -type d 2>/dev/null | head -1 || true)
+          if [ -n "$APP" ] && [ -d "$APP" ]; then
+            echo "found: $APP"
+            BASE=$(basename "$APP" .app)
+            # 未签名 .app 打成 zip，TrollStore / 自签工具直接吃
+            ditto -c -k --sequesterRsrc --keepParent "$APP" "out/${BASE}-unsigned.zip"
+            echo "signed=no" > out/BUILD-INFO.txt
+            {
+              echo "app          = $BASE"
+              echo "configuration= $CONFIG"
+              echo "signed       = no (CODE_SIGNING_ALLOWED=NO)"
+              echo "commit       = ${{ github.sha }}"
+              echo "run          = ${{ github.run_number }}"
+              echo "note         = ${{ inputs.note }}"
+            } >> out/BUILD-INFO.txt
+          else
+            echo "::warning::没找到 .app，构建大概失败了，看 build.log"
+            echo "app not found" > out/BUILD-INFO.txt
+          fi
           cp build.log out/ 2>/dev/null || true
-          ls -la out
+          ls -laR out | head -40
 
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: minis-build-${{ github.run_number }}
+          name: quanneng-ai-${{ github.run_number }}
           path: out/
-          retention-days: 7
+          retention-days: 14
           if-no-files-found: warn
 
+      # ── 8. 汇总，失败时一眼看出挂在哪 ──
       - name: Summary
         if: always()
         run: |
           {
             echo "## 构建结果"
             echo ""
-            echo "- 运行号：${{ github.run_number }}"
-            echo "- 目标：${{ github.event.inputs.target }}"
-            echo "- 说明：${{ github.event.inputs.note }}"
+            echo "| 项 | 值 |"
+            echo "|---|---|"
+            echo "| 结论 | ${{ job.status == 'success' && '✅ 成功' || '❌ 失败' }} |"
+            echo "| 配置 | \`$CONFIG\` |"
+            echo "| 运行号 | ${{ github.run_number }} |"
+            echo "| commit | \`${{ github.sha }}\` |"
+            echo "| 说明 | ${{ inputs.note || '（无）' }} |"
             echo ""
-            if [ "${{ job.status }}" = "success" ]; then
-              echo "✅ 成功。产物在本次运行的 Artifacts 里。"
-            else
-              echo "❌ 失败。先看 build.log，再往下看「Build」那一步。"
-            fi
+            echo "### 产物怎么装"
+            echo ""
+            echo "workflow 用 \`CODE_SIGNING_ALLOWED=NO\` 编译，artifact 里是**未签名**的 \`.app\`（zip 包）。"
+            echo "iOS 要求可执行文件带有效签名，所以不能直接拖进手机。两条路："
+            echo ""
+            echo "1. **TrollStore** —— 支持的系统版本直接装，免签名。"
+            echo "2. **自签** —— AltStore / Sideloadly / 自有企业证书，重签后安装。"
+            echo ""
+            echo "要出可直接安装的 \`.ipa\`，得配好证书和 provisioning profile，属于签名环节。"
           } >> "$GITHUB_STEP_SUMMARY"
