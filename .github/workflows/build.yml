@@ -622,6 +622,117 @@ jobs:
           echo "version    : $SHORT_VER ($BUILD_VER)"
           echo "min-os     : $MIN_OS"
 
+          # —— 0) 剥掉所有残留签名（必须在打包之前）——
+          #
+          # 为什么非做不可：真正让用户闪退的就是这个。
+          #
+          # 我们用 CODE_SIGNING_ALLOWED=NO 编，所以主程序 Minis 和三个
+          # appex（AgentWidget / MinisFileProvider / MinisShare）是**裸的**，
+          # 没有 LC_CODE_SIGNATURE。但 SPM binaryTarget 带进来的 8 个
+          # framework 是预编译产物，它们**自身带着原作者的签名**，
+          # Xcode 只是把它们复制进 .app/Frameworks，签名原样保留：
+          #
+          #   FFmpeg / libav{codec,filter,format,util}
+          #   libsw{resample,scale}                  -> org.ffmpeg.*  team=None
+          #   RealTimeCutVADCXXLibrary               -> io.code-concept.*
+          #                                             team=VBX7WSGEH9
+          #
+          # 结果是一个「半签不签」的包，自签工具两头堵：
+          #   · 若它见到有签名就跳过 → framework 保持 VBX7WSGEH9，
+          #     与用户自己的证书 team 不一致，dyld 加载 framework 时
+          #     校验失败，启动瞬间闪退。
+          #   · 若它强制全签但漏掉 appex → 三个 appex 的 bundle id 都是
+          #     com.vipios.app.*，必须与主 app 同一 team，漏一个也闪退。
+          #
+          # 正确做法不是去猜工具的行为，而是把包做成**真正干净**的：
+          # 把所有 Mach-O 的签名全部剥掉，产出一个「零签名」包，
+          # 让自签工具从头到尾统一签一遍。这样它没有可跳过的东西。
+          #
+          # 做法：
+          #   1. 找出 .app 里所有 Mach-O（file 命令判 "Mach-O"）
+          #   2. 用 codesign --remove-signature 剥离
+          #   3. 删掉所有 _CodeSignature 目录（里面是 CodeResources，
+          #      留着会让部分工具以为还有旧签名）
+          #
+          # 关于第 2 步为什么不直接无条件调用：
+          # codesign --remove-signature 对**本来就裸的**二进制行为不稳 ——
+          # 某些版本会报 "code object is not signed at all" 并以非零退出。
+          # 所以先用 `codesign -d --verbose=2` 判一次到底有没有签名，
+          # 真的带了 blast 才剥，避免把没签的也走一遍导致误判。
+          #
+          # 判据用 -d（display）而不是 --verify：
+          # --verify 会顺带校验资源封印，剥离前后都可能因为 CodeResources
+          # 缺失/过期而失败，那是另一个维度的问题，会污染这里的判断。
+          # -d 只回答「这个 Mach-O 里有没有 code signature」。
+          #
+          # 注意顺序：必须在 ditto / zip 打包之前。打包之后再改就得重打。
+          echo "== 剥离残留签名 =="
+          SIGNED_BEFORE=0
+          STRIPPED=0
+
+          # 这一整段都在 GitHub 默认的 `bash -e {0}` 下跑 ——
+          # 任何一条命令返回非零，步骤立刻红。
+          # 所以下面每一处「判断式」都必须自己兜住返回码：
+          #   · grep 没匹配 = 1        → 必须 || true
+          #   · codesign -d 对裸文件 = 1 → 必须 || true
+          #   · wc -l 读到空输入无关   → 但仍统一兜
+          # 这不是防御性冗余，是必需的：否则「没有残留签名」这种**正常情况**
+          # 会让 grep 返回 1，把整步打红，看起来像剥离失败。
+
+          # 收集所有 Mach-O 路径，后面两轮扫描都用这份清单，保证口径一致
+          MACHO_LIST=$(mktemp)
+          while IFS= read -r -d '' f; do
+            if file -b "$f" 2>/dev/null | grep -q "Mach-O"; then
+              printf '%s\n' "$f" >> "$MACHO_LIST"
+            fi
+          done < <(find "$APP" -type f -print0)
+          TOTAL_MACHO=$(wc -l < "$MACHO_LIST" 2>/dev/null | tr -d ' ' || echo 0)
+          TOTAL_MACHO=${TOTAL_MACHO:-0}
+          echo "  .app 内 Mach-O 共 $TOTAL_MACHO 个"
+
+          while IFS= read -r f; do
+            [ -n "$f" ] || continue
+            # 把 codesign 的输出先存进变量，再判 —— 避免管道把返回码搅在一起
+            CD_OUT=$(/usr/bin/codesign -d --verbose=2 "$f" 2>&1 || true)
+            case "$CD_OUT" in
+              *Signature*|*signature*)
+                SIGNED_BEFORE=$((SIGNED_BEFORE + 1))
+                if /usr/bin/codesign --remove-signature "$f" >/dev/null 2>&1; then
+                  STRIPPED=$((STRIPPED + 1))
+                  echo "  - 剥离 ${f#$APP/}"
+                else
+                  echo "  ! 剥离失败 ${f#$APP/}"
+                fi
+                ;;
+            esac
+          done < "$MACHO_LIST"
+
+          # 清 _CodeSignature 目录（含 framework 与 appex 内的）
+          CS_DIRS=$(find "$APP" -type d -name "_CodeSignature" 2>/dev/null | wc -l | tr -d ' ' || echo 0)
+          CS_DIRS=${CS_DIRS:-0}
+          find "$APP" -type d -name "_CodeSignature" -exec rm -rf {} + 2>/dev/null || true
+          echo "  带签名 $SIGNED_BEFORE 个 · 剥离 $STRIPPED 个 · 删 _CodeSignature 目录 $CS_DIRS 个"
+
+          # 剥完必须复核：任何一个还带签名，都说明剥离没生效，
+          # 这种包发出去用户照样闪退，所以这里硬失败。
+          REMAIN=0
+          while IFS= read -r f; do
+            [ -n "$f" ] || continue
+            CD_OUT=$(/usr/bin/codesign -d --verbose=2 "$f" 2>&1 || true)
+            case "$CD_OUT" in
+              *Signature*|*signature*)
+                REMAIN=$((REMAIN + 1))
+                echo "  !! 仍有签名: ${f#$APP/}"
+                ;;
+            esac
+          done < "$MACHO_LIST"
+          rm -f "$MACHO_LIST"
+          if [ "$REMAIN" != "0" ]; then
+            echo "::error::还有 $REMAIN 个 Mach-O 带签名，剥不干净会让自签工具跳过它们导致闪退"
+            exit 1
+          fi
+          echo "  复核通过：包内已无任何签名"
+
           # —— 1) 未签名 .app（TrollStore / 自签工具直接吃）——
           ditto -c -k --sequesterRsrc --keepParent "$APP" "out/${BASE}-unsigned.zip"
 
@@ -637,7 +748,7 @@ jobs:
           echo "ipa: out/$IPA_NAME"
 
           # —— 3) 关键校验：确认打出来的确实是共存版 ——
-          echo "signed       = no (CODE_SIGNING_ALLOWED=NO)" > out/BUILD-INFO.txt
+          echo "signed        = no (CODE_SIGNING_ALLOWED=NO + 残留签名已剥离)" > out/BUILD-INFO.txt
           {
             echo "app          = $BASE"
             echo "display-name = $DISPLAY_NAME"
@@ -649,6 +760,13 @@ jobs:
             echo "commit       = ${{ github.sha }}"
             echo "run          = ${{ github.run_number }}"
             echo "note         = ${{ inputs.note }}"
+            echo ""
+            echo "# 签名状态：这个包里所有 Mach-O 都是裸的（含 SPM framework）。"
+            echo "# 自签工具必须静默重签，不能跳过任何一个。"
+            echo "sig-stripped = $STRIPPED 个（剥离前带签名 $SIGNED_BEFORE 个）"
+            echo "sig-residual = 0（已复核）"
+            echo "codesig-dirs = $CS_DIRS 个已删除"
+            echo "nested-macho  = 主程序 + 3 appex + 8 SPM framework，共 12 个，全部裸签"
           } >> out/BUILD-INFO.txt
           cat out/BUILD-INFO.txt
 
