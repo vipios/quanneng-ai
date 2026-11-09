@@ -102,7 +102,11 @@ enum RelayError: LocalizedError {
         case .noKey:            return "还没填密钥。路由器重启要 airboot 的密钥，填一次就一直记住。"
         case .badHost:          return "地址格式不对。"
         case .badKey:           return "密钥不对。"
-        case .notLan:           return "这个操作只能在家里直连时做。"
+        // A6：airboot 里 `lan-only` 这个错误码是真实存在的（某些动作路由器端
+        // 确实只放行内网）。所以判据保留，只把话改准：是「这条指令」要求
+        // 在家直连，不是「所有操作」都要求 —— 别的动作在外走隧道照样能做，
+        // 原来说「这个操作只能在家里」会让人以为整个设备管理都白配了。
+        case .notLan:           return "这条指令要求在家直连。换个网络再试，或到家里连着 WiFi 再点。"
         case .badReply:         return "设备回了看不懂的内容。"
         case .http(let c):      return "返回 HTTP \(c)。"
         case .rejected(let e):  return "设备拒绝了：\(e)"
