@@ -4,11 +4,18 @@
 # 这个文件解决三件在真机上验证过会失败的事，逐条写清楚，免得以后
 # 有人「顺手改回去」又踩一遍：
 #
-# 1. runner 必须是 macos-26
-#    主 App target 的 IPHONEOS_DEPLOYMENT_TARGET 是 26.2，必须用
-#    iOS 26.2 及以上的 SDK 编。macos-14 自带 Xcode 15/16，SDK 里
-#    根本没有 iphoneos26.2，一编就报 "building for iOS 26.2, but the
-#    SDK is 18.x"。macos-26 自带 Xcode 26.6（默认）+ iOS 26.2 SDK。
+# 1. runner 必须是 macos-26（理由不是部署目标，别搞混）
+#    主 App target 的 IPHONEOS_DEPLOYMENT_TARGET 其实是 **16.0**
+#    （扩展 16.0 / Widget 16.2，只有 MinisTests 和 MinisUITests 是 26.2）。
+#    部署目标低不等于能用旧 SDK 编 —— 代码里有大量
+#    `@available(iOS 26.0, *)` 分支，并且直接引用了 iOS 26 才有的
+#    框架符号（AlarmKit 的 alarmkit_is_usable、BackgroundAssets 的
+#    BGContinuedProcessingTask 等）。这些**声明**来自 SDK 头文件，
+#    旧 SDK 里压根不存在，编译期就报 undeclared。
+#    所以 macos-26 是为了拿 iOS 26.x SDK，跟部署目标 16.0 不矛盾：
+#    部署目标是「最低能装到哪」，SDK 是「用什么编」。
+#    macos-14 自带 Xcode 15/16（SDK 18.x），一编就报
+#    "building for iOS 16.0, but the SDK is 18.x" 之后还会撞 undeclared。
 #
 # 2. 原生依赖必须先编，不能跳过
 #    Xcode 工程按相对路径引用 deps/libs、deps/include、deps/frameworks、
@@ -16,9 +23,14 @@
 #    clone 下来是空的。不先跑 deps/ 下的脚本，链接阶段必然一堆
 #    undefined symbol。顺序不能调：FFmpeg 链 LAME，所以 LAME 先。
 #
-# 3. 必须用 iPhoneOS 26.2 的 SDK，且不能有 CRLF
+# 3. 必须用 xcrun 取的 iPhoneOS SDK，且不能有 CRLF
 #    .gitattributes 已经把 .sh/.swift/.pbxproj 全锁成 LF。Windows 上
 #    core.autocrlf=true 检出的 CRLF 会让 shebang 变 `#!/bin/sh^M`。
+#    不写死 26.2 这个版本号 —— runner 镜像会升级，写死了反而脆。
+#
+# 内存：见 Build 步骤里的 -jobs。macos-26 上 xcodebuild 默认按核心数开
+#    swift-frontend，十几个一起会 OOM 被杀（日志零 error: 全是 warning）。
+#    不要再往 env 里加 SWIFT_ENABLE_EXPLICIT_MODULES=NO，那是反效果。
 #
 # 产物说明：
 #    workflow 用 CODE_SIGNING_ALLOWED=NO 编，产出**未签名**的 .app。
@@ -68,8 +80,12 @@ jobs:
       # 用固定的 DerivedData 路径，后面缓存和产物收集都认这个
       DERIVED: ${{ github.workspace }}/build
       CONFIG: ${{ inputs.configuration || 'Release' }}
-      # 关掉 Swift 的显式模块构建，CI 上偶发 OOM
-      SWIFT_ENABLE_EXPLICIT_MODULES: NO
+      # 编译并发数。不要再往 env 里塞 SWIFT_ENABLE_EXPLICIT_MODULES=NO ——
+      # 那行看着像「省内存」，实际是关掉显式模块让同一个 module 被重复
+      # 构建，反而把内存峰值推得更高。run #15 的 swift-frontend 就是被
+      # OOM 杀的（日志零 error: 全是 warning，进程直接没了）。
+      # 真正的解法是把并发压下来，在 Build 步骤用 -jobs 传，见下面。
+      BUILD_JOBS: 4
 
     steps:
       # ── 0. 打印环境，失败时日志第一段就能定位是不是环境问题 ──
@@ -425,6 +441,12 @@ jobs:
           #   "xcodebuild: error: Unknown build action 'NO'."
           #   我们要的是"不做自动签名"，所以这个开关根本不加。
           #   CODE_SIGNING_ALLOWED=NO 这几个才是 key=value 形态。
+          #
+          # -jobs "$BUILD_JOBS" 是本文件唯一的内存控制手段：
+          #   macos-26 runner 上 xcodebuild 默认按 CPU 核心数并发起
+          #   swift-frontend，每个吃 1–2GB，十几个一起打满内存就被 OOM
+          #   killer 干掉 —— 症状是日志里零 error:、全是 warning，然后
+          #   进程凭空消失。压到 4 路是这台 runner 的安全值。
           set -o pipefail
           xcodebuild \
             -project src/ios/Minis.xcodeproj \
@@ -433,6 +455,7 @@ jobs:
             -sdk iphoneos \
             -destination 'generic/platform=iOS' \
             -derivedDataPath "$DERIVED" \
+            -jobs "$BUILD_JOBS" \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \

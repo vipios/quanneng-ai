@@ -419,6 +419,24 @@ struct ContentView: View {
     // [T-ios-crash-objectdestroy-fab-uaf] Same, for the draggable FABs.
     @State var fabActions = FABActionChannel()
 
+    // MARK: - 侧抽（R28）
+
+    /// 抽屉搜索框的文字。
+    ///
+    /// 和侧栏搜索的 `searchText` 刻意分开：侧栏搜索会驱动
+    /// `searchMatchedIds` / `searchMatchSnippets` 那套全库检索，
+    /// 抽屉是「一边打字一边就地出结果」，两套状态混用会互相清空。
+    /// 抽屉这边标题命中本地算，正文命中复用 `searchMatchSnippets`
+    /// （有就带上，没有不重跑 SQL）。
+    @State var drawerQuery = ""
+
+    /// 是否弹出「全部产物」。
+    ///
+    /// 不复用 `activeToolSheet`：那是 `ToolSheet` 枚举，加一个 case 就要
+    /// 动它的 switch；而且全部产物需要传 `ArtifactStore` 和 `sessions`，
+    /// 用独立的 `.sheet(isPresented:)` 传参更直白。
+    @State var showAllArtifacts = false
+
     // Search
     @State var showSearchBar = false
     var isSearching: Bool { showSearchBar && !searchText.isEmpty }
@@ -568,7 +586,13 @@ struct ContentView: View {
                 if wide {
                     splitLayout
                 } else {
-                    stackLayout
+                    // iPhone：原版 NavigationStack 原样包进左边缘抽屉。
+                    // 对话页、push、返回全部走原版代码，一行没改 ——
+                    // 这里只是给它外面加了一层，见 ContentView+Drawer.swift。
+                    //
+                    // 宽度用外层这个 geo 直接传：再套一层 GeometryReader 会让
+                    // 里面的 NavigationStack 拿不到尺寸约束，塌成 0 高。
+                    stackLayoutWithDrawer(width: geo.size.width)
                 }
             }
             .overlay(alignment: .top) {
@@ -787,6 +811,15 @@ struct ContentView: View {
         }
         .sheet(isPresented: $showAlarmList, onDismiss: { fetchAlarmsIfNeeded() }) {
             AlarmListView()
+        }
+        // 抽屉「全部产物」入口。数据源用现成的 `ArtifactStore.shared`
+        // （扫描 / 分组 / 搜索 / 改名 / 删除都已实现），这一页只做呈现。
+        // `onLocate` 把「在对话中定位」接回原版 push 路径。
+        .sheet(isPresented: $showAllArtifacts) {
+            AllArtifactsView(store: ArtifactStore.shared, sessions: sessions) { sessionId, _ in
+                showAllArtifacts = false
+                openSessionFromDrawer(sessionId)
+            }
         }
         .sheet(item: $activeToolSheet) { sheet in
             switch sheet {

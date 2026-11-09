@@ -110,6 +110,11 @@ src/android/app/src/main/assets/bashism/
 # and never matched src/ios/Minis.xcodeproj/xcshareddata/xcdebugger/.
 **/xcshareddata/xcdebugger/
 
+# pbxproj 备份：*到 pbxproj 上都由脚本生成，备份只对本机有意义。
+# 这些文件体积不小（每个 340KB 左右），且含本机时间戳，推上去纯是噪音。
+src/ios/Minis.xcodeproj/*.bak-*
+*.bak-*
+
 # Python bytecode from the test/build scripts
 __pycache__/
 

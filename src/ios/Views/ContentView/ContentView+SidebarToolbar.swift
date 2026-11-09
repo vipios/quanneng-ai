@@ -337,17 +337,15 @@ extension ContentView {
                 .frame(maxWidth: .infinity, alignment: .center)
             }
         }
+        // [R28-设置入口右下角] 原来这里是 `.topBarLeading` 的 gear 按钮。
+        // 按要求设置入口挪到抽屉右下角的悬浮齿轮（SessionDrawer 里），
+        // 所以这一项只在多选态保留「取消」，非多选态不再出按钮。
+        // 抽屉里的齿轮直接写 `activeToolSheet = .settings`，行为一致。
         ToolbarItem(placement: .topBarLeading) {
             if isSelecting {
                 Button("Cancel") {
                     isSelecting = false
                     selectedIds.removeAll()
-                }
-            } else {
-                Button {
-                    activeToolSheet = .settings
-                } label: {
-                    Image(systemName: "gear")
                 }
             }
         }

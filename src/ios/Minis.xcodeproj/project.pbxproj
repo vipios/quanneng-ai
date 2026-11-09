@@ -637,6 +637,12 @@
 		RCL000119 /* BackupHistoryDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = RCL000219 /* BackupHistoryDetailView.swift */; };
 		RCL000120 /* BackupCategoryIcon.swift in Sources */ = {isa = PBXBuildFile; fileRef = RCL000220 /* BackupCategoryIcon.swift */; };
 		RCL000121 /* BackupHUD.swift in Sources */ = {isa = PBXBuildFile; fileRef = RCL000221 /* BackupHUD.swift */; };
+		FD2A00000000000000000001 /* EdgeDrawer.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD1A00000000000000000001 /* EdgeDrawer.swift */; };
+		FD2A00000000000000000002 /* SessionDrawer.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD1A00000000000000000002 /* SessionDrawer.swift */; };
+		FD2A00000000000000000003 /* AllArtifactsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD1A00000000000000000003 /* AllArtifactsView.swift */; };
+		FD2A00000000000000000004 /* ContentView+Drawer.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD1A00000000000000000004 /* ContentView+Drawer.swift */; };
+		FF2A00000000000000000001 /* RouteEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF1A00000000000000000001 /* RouteEngine.swift */; };
+		FF2A00000000000000000002 /* RouteRules.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF1A00000000000000000002 /* RouteRules.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -1477,6 +1483,12 @@
 		RCL000219 /* BackupHistoryDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackupHistoryDetailView.swift; sourceTree = "<group>"; };
 		RCL000220 /* BackupCategoryIcon.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackupCategoryIcon.swift; sourceTree = "<group>"; };
 		RCL000221 /* BackupHUD.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackupHUD.swift; sourceTree = "<group>"; };
+		FD1A00000000000000000001 /* EdgeDrawer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EdgeDrawer.swift; sourceTree = "<group>"; };
+		FD1A00000000000000000002 /* SessionDrawer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionDrawer.swift; sourceTree = "<group>"; };
+		FD1A00000000000000000003 /* AllArtifactsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AllArtifactsView.swift; sourceTree = "<group>"; };
+		FD1A00000000000000000004 /* ContentView+Drawer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView+Drawer.swift; sourceTree = "<group>"; };
+		FF1A00000000000000000001 /* RouteEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RouteEngine.swift; sourceTree = "<group>"; };
+		FF1A00000000000000000002 /* RouteRules.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RouteRules.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -2051,8 +2063,21 @@
 				F1V00016 /* Skills */,
 				F1VMCPG0 /* MCP */,
 				EAB000060 /* Sync */,
+				FD1A000000000000000000FF /* Drawer */,
 			);
 			path = Views;
+			sourceTree = "<group>";
+		};
+
+		FD1A000000000000000000FF /* Drawer */ = {
+			isa = PBXGroup;
+			children = (
+				FD1A00000000000000000001 /* EdgeDrawer.swift */,
+				FD1A00000000000000000002 /* SessionDrawer.swift */,
+				FD1A00000000000000000003 /* AllArtifactsView.swift */,
+				FD1A00000000000000000004 /* ContentView+Drawer.swift */,
+			);
+			path = Drawer;
 			sourceTree = "<group>";
 		};
 		E5E000030 /* ShareExtension */ = {
@@ -2765,8 +2790,19 @@
 			isa = PBXGroup;
 			children = (
 				E5N0000132F3B941A00049557 /* SkillsManagementView.swift */,
+				FF1A000000000000000000FF /* Domain */,
 			);
 			path = Skills;
+			sourceTree = "<group>";
+		};
+
+		FF1A000000000000000000FF /* Domain */ = {
+			isa = PBXGroup;
+			children = (
+				FF1A00000000000000000001 /* RouteEngine.swift */,
+				FF1A00000000000000000002 /* RouteRules.swift */,
+			);
+			path = Domain;
 			sourceTree = "<group>";
 		};
 		F1VMCPG0 /* MCP */ = {
@@ -3160,6 +3196,12 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				FF2A00000000000000000001 /* RouteEngine.swift in Sources */,
+				FF2A00000000000000000002 /* RouteRules.swift in Sources */,
+				FD2A00000000000000000001 /* EdgeDrawer.swift in Sources */,
+				FD2A00000000000000000002 /* SessionDrawer.swift in Sources */,
+				FD2A00000000000000000003 /* AllArtifactsView.swift in Sources */,
+				FD2A00000000000000000004 /* ContentView+Drawer.swift in Sources */,
 				AC0000202 /* ProviderCustomizationGenerated.swift in Sources */,
 				E54000AC1 /* DebugSkillGenerated.swift in Sources */,
 				E5FP00100 /* AppGroupChangeWatcher.swift in Sources */,
