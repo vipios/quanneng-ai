@@ -2641,6 +2641,22 @@
 			path = GitHub;
 			sourceTree = "<group>";
 		};
+		FE1A000000000000000000FF /* Relay */ = {
+			isa = PBXGroup;
+			children = (
+				FE1A00000000000000000001 /* RelayRoute.swift */,
+				FE1A00000000000000000002 /* RelayVault.swift */,
+				FE1A00000000000000000003 /* RelayBackend.swift */,
+				FE1A00000000000000000004 /* RelayStore.swift */,
+				FE1A00000000000000000005 /* RelayRouterView.swift */,
+				FE1A00000000000000000006 /* RelayAdminView.swift */,
+				FE1A00000000000000000007 /* RelaySettingsView.swift */,
+				FE1A00000000000000000008 /* RelayProviderSettings.swift */,
+				FE1A00000000000000000009 /* AddRelayProviderView.swift */,
+			);
+			path = Relay;
+			sourceTree = "<group>";
+		};
 		F1V00011 /* Settings */ = {
 			isa = PBXGroup;
 			children = (
@@ -2682,15 +2698,7 @@
 				E5LOCK102 /* FaceIDProtectionSettingsView.swift */,
 				E5LOCK103 /* AppLockOverlay.swift */,
 				C41000000000000000000000 /* GitHub */,
-				FE1A00000000000000000001 /* RelayRoute.swift */,
-				FE1A00000000000000000002 /* RelayVault.swift */,
-				FE1A00000000000000000003 /* RelayBackend.swift */,
-				FE1A00000000000000000004 /* RelayStore.swift */,
-				FE1A00000000000000000005 /* RelayRouterView.swift */,
-				FE1A00000000000000000006 /* RelayAdminView.swift */,
-				FE1A00000000000000000007 /* RelaySettingsView.swift */,
-				FE1A00000000000000000008 /* RelayProviderSettings.swift */,
-				FE1A00000000000000000009 /* AddRelayProviderView.swift */,
+				FE1A000000000000000000FF /* Relay */,
 			);
 			path = Settings;
 			sourceTree = "<group>";
