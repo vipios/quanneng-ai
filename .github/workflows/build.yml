@@ -80,12 +80,30 @@ jobs:
       # 用固定的 DerivedData 路径，后面缓存和产物收集都认这个
       DERIVED: ${{ github.workspace }}/build
       CONFIG: ${{ inputs.configuration || 'Release' }}
-      # 编译并发数。不要再往 env 里塞 SWIFT_ENABLE_EXPLICIT_MODULES=NO ——
-      # 那行看着像「省内存」，实际是关掉显式模块让同一个 module 被重复
-      # 构建，反而把内存峰值推得更高。run #15 的 swift-frontend 就是被
-      # OOM 杀的（日志零 error: 全是 warning，进程直接没了）。
-      # 真正的解法是把并发压下来，在 Build 步骤用 -jobs 传，见下面。
+      # ── 内存控制：两层都得压，只压一层没用 ──
+      #
+      # 症状（run #15 / #16 实测）：日志里零 error:、全是 warning，然后
+      # 蹦出 "Failed frontend command:" 和一行超长的 swift-frontend 命令，
+      # 紧接着 ** BUILD FAILED **。这不是代码错，是 swift-frontend 进程
+      # 被 OOM killer 干掉了 —— 它连 error 都来不及打印。
+      #
+      # 为什么单靠 xcodebuild -jobs 不够：
+      #   -jobs 控制的是「同时跑几个构建任务」，而一个 SwiftCompile 任务
+      #   内部还会按 CPU 核心数再并行起**多个** swift-frontend 进程。
+      #   macos-26 runner 是 3–4 核 / 7GB，默认能起十几个 frontend，
+      #   每个 1–2GB，必被 OOM。
+      #
+      # 所以三层一起压：
+      #   1. -jobs 4         → 少跑几个构建任务
+      #   2. SWIFT_DRIVER_JOBS 2 → 一个编译任务内部只并行 2 个 frontend
+      #   3. SWIFT_COMPILATION_MODE=wholemodule → Release 本来就是整模块
+      #      编，明确写出来避免增量模式额外驻留一份 AST
+      #
+      # 不要再加 SWIFT_ENABLE_EXPLICIT_MODULES=NO：它关掉显式模块后
+      # 同一个 module 会被重复构建，内存峰值反而更高。
       BUILD_JOBS: 4
+      SWIFT_DRIVER_JOBS: 2
+      SWIFT_COMPILATION_MODE: wholemodule
 
     steps:
       # ── 0. 打印环境，失败时日志第一段就能定位是不是环境问题 ──
@@ -442,11 +460,10 @@ jobs:
           #   我们要的是"不做自动签名"，所以这个开关根本不加。
           #   CODE_SIGNING_ALLOWED=NO 这几个才是 key=value 形态。
           #
-          # -jobs "$BUILD_JOBS" 是本文件唯一的内存控制手段：
-          #   macos-26 runner 上 xcodebuild 默认按 CPU 核心数并发起
-          #   swift-frontend，每个吃 1–2GB，十几个一起打满内存就被 OOM
-          #   killer 干掉 —— 症状是日志里零 error:、全是 warning，然后
-          #   进程凭空消失。压到 4 路是这台 runner 的安全值。
+          # 内存控制：见文件顶部 env 里 BUILD_JOBS / SWIFT_DRIVER_JOBS /
+          # SWIFT_COMPILATION_MODE 三条的说明。-jobs 只压构建任务数，
+          # 压不住一个任务内部并行起的多个 swift-frontend，所以还要
+          # SWIFT_DRIVER_JOBS 兜底（这条是 run #16 被 OOM 杀掉后补的）。
           set -o pipefail
           xcodebuild \
             -project src/ios/Minis.xcodeproj \
@@ -481,14 +498,42 @@ jobs:
           BASE=$(basename "$APP" .app)
           echo "bundle: $BASE"
 
-          # —— 从产物的 Info.plist 读出真实身份，不靠猜 ——
+          # —— 先确认 .app 是完整的，再读身份 ——
+          #
+          # 为什么必须查：构建被 OOM 掐掉时，.app 目录已经建出来了，
+          # 但 Info.plist 还没写。此时 PlistBuddy 会把
+          #   "File Doesn't Exist, Will Create: <path>"
+          # 打到 **stdout**（不是 stderr！），`2>/dev/null` 拦不住，
+          # 于是这串错误文字被赋值给 $BUNDLE_ID / $SHORT_VER，
+          # 一路污染到 ipa 文件名，最后 zip 报
+          #   "Could not create output file (...-File Doesn't Exist...)"
+          # ——症状看着像打包脚本的 bug，其实是编译没编完。
+          # run #16 就是这么死的。
           PLIST="$APP/Info.plist"
-          BUNDLE_ID=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$PLIST" 2>/dev/null || echo "?")
-          DISPLAY_NAME=$(/usr/libexec/PlistBuddy -c "Print :CFBundleDisplayName" "$PLIST" 2>/dev/null || echo "?")
-          SHORT_VER=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$PLIST" 2>/dev/null || echo "1.0")
-          BUILD_VER=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$PLIST" 2>/dev/null || echo "1")
-          MIN_OS=$(/usr/libexec/PlistBuddy -c "Print :MinimumOSVersion" "$PLIST" 2>/dev/null || echo "?")
-          EXEC_NAME=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$PLIST" 2>/dev/null || echo "$BASE")
+          if [ ! -f "$PLIST" ]; then
+            echo "::error::$APP 里没有 Info.plist，说明编译没跑完（大概率 OOM 被杀）。看 build.log 里的 'Failed frontend command'"
+            echo "app incomplete (no Info.plist)" > out/BUILD-INFO.txt
+            cp build.log out/ 2>/dev/null || true
+            exit 1
+          fi
+
+          # PlistBuddy 读不到某个键时返回非零，此时用默认值。
+          # 这里显式把 stderr 也丢掉，并二次校验输出里不含 "Doesn't Exist"
+          # —— 双重保险，避免错误串再次污染文件名。
+          pb() {
+            local key="$1" dflt="$2" v
+            v=$(/usr/libexec/PlistBuddy -c "Print :$key" "$PLIST" 2>/dev/null) || v=""
+            case "$v" in
+              *"Doesn't Exist"*|*Error*) v="" ;;
+            esac
+            printf '%s' "${v:-$dflt}"
+          }
+          BUNDLE_ID=$(pb CFBundleIdentifier "?")
+          DISPLAY_NAME=$(pb CFBundleDisplayName "?")
+          SHORT_VER=$(pb CFBundleShortVersionString "1.0")
+          BUILD_VER=$(pb CFBundleVersion "1")
+          MIN_OS=$(pb MinimumOSVersion "?")
+          EXEC_NAME=$(pb CFBundleExecutable "$BASE")
 
           echo "bundle-id  : $BUNDLE_ID"
           echo "display    : $DISPLAY_NAME"
@@ -525,10 +570,22 @@ jobs:
           } >> out/BUILD-INFO.txt
           cat out/BUILD-INFO.txt
 
-          # 身份不对就让这一步红 —— 装上去发现是原版就白折腾了
+          # 身份不对就让这一步真的红。
+          # 原来只 echo ::error:: 不 exit —— GitHub 会把 ::error:: 标红，
+          # 但步骤退出码仍是 0，于是「红着成功」，artifact 照样传上去，
+          # 很容易误以为没问题。现在是硬失败。
           if [ "$BUNDLE_ID" != "com.vipios.app" ]; then
             echo "::error::Bundle ID 是 $BUNDLE_ID，不是 com.vipios.app，装的会和原版冲突"
+            cp build.log out/ 2>/dev/null || true
+            exit 1
           fi
+
+          # ipa 至少要能解开、里面有可执行文件，否则就是空壳
+          if ! unzip -l "out/$IPA_NAME" | grep -q "Payload/$BASE.app/$EXEC_NAME"; then
+            echo "::error::ipa 里找不到可执行文件 Payload/$BASE.app/$EXEC_NAME，包是空壳"
+            exit 1
+          fi
+          echo "OK ipa 内含可执行文件 $EXEC_NAME"
 
           cp build.log out/ 2>/dev/null || true
           ls -lh out/
