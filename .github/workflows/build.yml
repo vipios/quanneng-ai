@@ -384,6 +384,12 @@ jobs:
       - name: Build
         id: build
         run: |
+          # 注意 flag 形态：
+          #   -allowProvisioningUpdates 是开关，不能带值 —— 写成 "... NO" 会让
+          #   xcodebuild 把 NO 当成 build action，直接报
+          #   "xcodebuild: error: Unknown build action 'NO'."
+          #   我们要的是"不做自动签名"，所以这个开关根本不加。
+          #   CODE_SIGNING_ALLOWED=NO 这几个才是 key=value 形态。
           set -o pipefail
           xcodebuild \
             -project src/ios/Minis.xcodeproj \
@@ -392,13 +398,12 @@ jobs:
             -sdk iphoneos \
             -destination 'generic/platform=iOS' \
             -derivedDataPath "$DERIVED" \
-            -allowProvisioningUpdates NO \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGN_ENTITLEMENTS="" \
             ENABLE_BITCODE=NO \
-            build 2>&1 | tee build.log | tail -80
+            build 2>&1 | tee build.log | tail -100
 
       # ── 7. 收集产物：同时出 .app zip 和 .ipa ──
       - name: Collect artifacts
