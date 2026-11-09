@@ -232,7 +232,11 @@ enum SelfUpdate {
     /// 打一条线路。任何失败都返回 nil —— 竞速场景下失败没有信息量，
     /// 只有「全都失败」才需要给用户看，那由调用方统一出文案。
     private static func probe(line: Line, repo: String) async -> Win? {
-        guard let url = line.url(repo) else { return nil }
+        // 参数标签不能省：`func url(repo: String) -> URL?`（第 156 行）
+        // 少了 repo: 会报 "missing argument label 'repo:' in call"，
+        // 而且连带下一行 req.cachePolicy 报 "cannot infer contextual base"——
+        // 那条是假的，真因就是这里。
+        guard let url = line.url(repo: repo) else { return nil }
 
         var req = URLRequest(url: url)
         req.timeoutInterval = lineTimeout

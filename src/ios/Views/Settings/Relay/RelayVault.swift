@@ -107,13 +107,17 @@ final class RelayVault {
     // MARK: - 地址（只存 host，协议和端口由 RelayRoute 决定）
 
     var homeHost: String {
-        get { Self.clean(UserDefaults.standard.string(forKey: kHome), fallback: Self.defaultHomeHost) }
-        set { UserDefaults.standard.set(Self.clean(newValue, fallback: Self.defaultHomeHost), forKey: kHome) }
+        // 函数名是 cleanHost（下面 124 / 143 行两个重载），不是 clean。
+        // 之前写成 Self.clean 是编译错误：number of errors 里报
+        // "type 'Self' has no member 'clean'" —— 一直被 WMO 的 OOM
+        // 掩盖着，换 singlefile 后才露出来。
+        get { Self.cleanHost(UserDefaults.standard.string(forKey: kHome), fallback: Self.defaultHomeHost) }
+        set { UserDefaults.standard.set(Self.cleanHost(newValue, fallback: Self.defaultHomeHost), forKey: kHome) }
     }
 
     var awayHost: String {
-        get { Self.clean(UserDefaults.standard.string(forKey: kAway), fallback: Self.defaultAwayHost) }
-        set { UserDefaults.standard.set(Self.clean(newValue, fallback: Self.defaultAwayHost), forKey: kAway) }
+        get { Self.cleanHost(UserDefaults.standard.string(forKey: kAway), fallback: Self.defaultAwayHost) }
+        set { UserDefaults.standard.set(Self.cleanHost(newValue, fallback: Self.defaultAwayHost), forKey: kAway) }
     }
 
     /// 用户可能整段粘一个 URL 进来（http://a.b:8080/x），这里只保留 host。

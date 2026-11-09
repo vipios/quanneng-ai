@@ -332,10 +332,20 @@ private struct RelayWebContainer: UIViewRepresentable {
             }
 
             // 先摘掉旧的（可能换了密码），再装新的，避免叠多份。
-            // 由 Coordinator 记住装了哪些，因为 struct 是值类型，
-            // 每次 updateUIView 都是新的副本，不能自己存状态。
+            //
+            // ⚠️ WKUserContentController **没有** removeUserScript(_:)。
+            //   公开 API 只有两个：addUserScript(_:) 和 removeAllUserScripts()。
+            //   之前那句 `installedScripts.forEach { ucc.removeUserScript($0) }`
+            //   是凭印象写的，报 "value of type 'WKUserContentController'
+            //   has no member 'removeUserScript'" —— 一直被 WMO 的 OOM 掩盖着。
+            //
+            // 整批摘是有副作用的：removeAllUserScripts() 会连系统注入
+            // （比如某些内建 handler）一起清掉，所以摘完必须**紧接着**
+            // 把我方脚本全部重装 —— 下面的 for 循环正好干这件事，中间不能
+            // 插早退。Coordinator 里的 installedScripts 仍然要维护：它不是
+            // 用来摘除的，而是给 makeUIView 判重、给后续逻辑记录「装了什么」。
             let ucc = uiView.configuration.userContentController
-            context.coordinator.installedScripts.forEach { ucc.removeUserScript($0) }
+            ucc.removeAllUserScripts()
             context.coordinator.installedScripts = []
             for src in Self.injectionScripts(password, origin: Self.origin(of: urlString)) {
                 let s = WKUserScript(source: src,
