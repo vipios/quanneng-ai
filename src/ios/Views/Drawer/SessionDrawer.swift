@@ -45,7 +45,6 @@ struct SessionDrawer: View {
 
     /// 动作
     let menuActions: SessionMenuActionChannel
-    let onOpenSession: (String) -> Void
     let onOpenAllArtifacts: () -> Void
     let onNewChat: () -> Void
     let onOpenSettings: () -> Void
@@ -94,6 +93,18 @@ struct SessionDrawer: View {
         // overlay 让齿轮浮在列表之上、按钮区之外，两者互不影响。
         .overlay(alignment: .bottomTrailing) {
             settingsGear
+        }
+        // 会话真的切过去了才关抽屉。
+        //
+        // 为什么不写在点击回调里：行是 SessionStackRow(内部 Button)，
+        // 点击先经过原版通道 `menuActions.send(.open)`，再由 ContentView
+        // 改 currentSessionId。在这里观察它的变化，既能保证「切成功才关」，
+        // 也不用和行的 Button 抢手势优先级。旧写法是先 onOpenSession 再
+        // close，顺序反了会在新页面上看到抽屉飘一下。
+        .onChange(of: currentSessionId) { newValue in
+            if newValue != nil, drawerState.isOpen {
+                drawerState.close()
+            }
         }
     }
 
@@ -263,6 +274,20 @@ struct SessionDrawer: View {
         let session = sessions.first(where: { $0.id == sid })
             ?? .missingRowPlaceholder(sid)
 
+        // 不要再在这行外面套 `.onTapGesture { onOpenSession(sid) }`。
+        //
+        // SessionStackRow 内部本身就是一个 Button，点了会走
+        // `menuActions.send(.open(sid))` → ContentView 的
+        // `switchToSession(sid, animated: true)`，那是原版路径：
+        // 它会替换而不是追加导航栈，还会按 shouldAnimateSessionPush
+        // 决定要不要动画。
+        //
+        // 外面再套一层 tap 就等于同一个会话开两次，而且两条路径口径不同
+        // （onOpenSession 用的是 append，会把栈堆起来）。点一次抽屉、
+        // 后退一次发现还在原页面，就是这么来的。
+        //
+        // 关抽屉交给 `.onChange(of: currentSessionId)` —— 会话真的切过去了
+        // 才关，这不依赖点击事件的先后顺序，也不会和行的 Button 抢手势。
         return SessionStackRow(
             session: session,
             isActive: isActive(sid),
@@ -281,11 +306,6 @@ struct SessionDrawer: View {
                     .fill(Color.accentColor.opacity(0.10))
                     .padding(.horizontal, 8)
             }
-        }
-        .onTapGesture {
-            // 先关抽屉再切会话 —— 反过来的话抽屉会在新页面上飘一下。
-            onOpenSession(sid)
-            drawerState.close()
         }
     }
 
@@ -350,8 +370,13 @@ struct SessionDrawer: View {
     private func artifactRow(_ m: ArtifactMatch) -> some View {
         Button {
             // R28：点产物不是「跳到产物页」，而是回到它所属的对话并定位。
-            onOpenSession(m.sessionId)
-            drawerState.close()
+            //
+            // 走 menuActions 而不是 onOpenSession：这是原版的行点击通道，
+            // ContentView 那边是 switchToSession(sid, animated: true) ——
+            // 替换栈、按规则决定动画。onOpenSession 走的是 append，会把
+            // 导航栈越堆越深，抽屉来回点几次之后返回要按很多下。
+            // 关抽屉交给底部的 .onChange(of: currentSessionId)。
+            menuActions.send(.open(m.sessionId))
         } label: {
             HStack(spacing: 10) {
                 Image(systemName: m.kind.symbol)

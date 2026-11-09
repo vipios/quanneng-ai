@@ -46,9 +46,6 @@ extension ContentView {
                 sessionMatches: drawerSessionMatches,
                 artifactMatches: drawerArtifactMatches,
                 menuActions: menuActions,
-                onOpenSession: { id in
-                    openSessionFromDrawer(id)
-                },
                 onOpenAllArtifacts: {
                     drawerState.close()
                     showAllArtifacts = true
@@ -150,17 +147,25 @@ extension ContentView {
 
     // MARK: - 动作
 
-    /// 从抽屉点开一个会话。
+    /// 从「全部产物」页点「在对话中定位」时，切到目标会话。
     ///
-    /// 走原版 push 路径（改 `navigationPath`），不自己造导航 ——
-    /// 否则 `AIChatView` 的 onAppear/onDisappear 记号会乱，
-    /// `currentStackSessionId` 和 `previousStackSessionId` 也会脱节。
+    /// 这里刻意委托给原版 `switchToSession`，不自己改 navigationPath。
+    /// 自己写那版（下面注释里保留的旧实现）漏了三件事：
+    ///   1. iPad 宽屏分支 —— 宽屏不用导航栈，走的是 selectedSessionId，
+    ///      自己 append 一遍等于什么都没选上；
+    ///   2. `shouldAnimateSessionPush` 的动画判定；
+    ///   3. `currentStackSessionId` 的同步 —— 不写它，
+    ///      `previousStackSessionId` 会错位，AIChatView 的 onAppear /
+    ///      onDisappear 记号跟着乱。
+    ///
+    /// 旧实现（保留作参照，不要再启用）：
+    ///     navigationPath = NavigationPath()
+    ///     navigationPath.append(id)
     func openSessionFromDrawer(_ id: String) {
         if Self.isNewSessionId(id) {
             handleNewChatRequest()
             return
         }
-        navigationPath = NavigationPath()
-        navigationPath.append(id)
+        switchToSession(id)
     }
 }
