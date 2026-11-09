@@ -173,6 +173,9 @@ private struct EdgePanOverlay: UIViewRepresentable {
         let v = PassthroughView()
         v.backgroundColor = .clear
         v.isUserInteractionEnabled = true
+        // 初次创建时抽屉是收起的，边缘窄带宽度立刻生效。
+        v.edgeSlop = DrawerState.edgeSlop
+        v.activeWidth = 0
 
         let pan = UIPanGestureRecognizer(
             target: context.coordinator,
@@ -191,6 +194,28 @@ private struct EdgePanOverlay: UIViewRepresentable {
     func updateUIView(_ uiView: UIView, context: Context) {
         context.coordinator.width = drawerWidth
         context.coordinator.state = state
+
+        // 这里**不要**去给 PassthroughView.activeWidth 赋值。
+        //
+        // 看着很自然的写法是：抽屉开着就 activeWidth = drawerWidth，
+        // 让 point(inside:) 返回 true，用户就能从屏幕任意位置往左拖回去。
+        // 结论是不能这么干：EdgePanOverlay 在 ZStack 最上层，
+        // point(inside:) 一旦全返回 true，这层就把所有触摸吃掉了 ——
+        // 遮罩的 onTapGesture 收不到、抽屉里的会话行/齿轮/按钮全点不动，
+        // 抽屉彻底废掉。hitTest 返回自己之后触摸不会转给兄弟视图，
+        // 这不是 cancelsTouchesInView = false 能解决的（那个只影响
+        // 「手势识别成功后是否取消 touchesBegan」）。
+        //
+        // 现在的行为（activeWidth 恒 0）是：抽屉关着时左边缘 24pt 能拉开，
+        // 拉开后点遮罩或点标题栏都能关，只是不能从中间往左拖回去。
+        // 属于「缺一个手势入口」，不是「点不动」，可接受。
+        //
+        // 要补全那个手势，正确做法是把 UIPanGestureRecognizer 挂到
+        // window 上（让这层 hitTest 永远返回 nil 保持完全穿透），
+        // 靠 delegate 的 shouldBegin 决定是否接管。那是手势架构改动，
+        // 必须在真机上验过遮罩点击、抽屉内滚动、表格滑动都不受影响才能上，
+        // 不要在没有真机验证的情况下改这里。
+        uiView.backgroundColor = .clear
     }
 
     func makeCoordinator() -> Coordinator {
