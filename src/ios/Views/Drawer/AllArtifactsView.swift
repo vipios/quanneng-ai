@@ -44,9 +44,8 @@ struct AllArtifactsView: View {
     /// Quick Look 预览
     @State private var previewURL: URL?
 
-    /// 长按菜单 / 删除确认
-    @State private var pendingDelete: ArtifactItem?
-    @State private var renaming: ArtifactItem?
+    /// 长按菜单 / 删除确认 / 改名 / 报错，统一走一个 alert（见 body 里的注释）
+    @State private var activeAlert: ActiveAlert?
     @State private var renameText = ""
     @State private var errorText: String?
 
@@ -91,31 +90,84 @@ struct AllArtifactsView: View {
                 await store.refresh(sessions: sessions)
             }
             .quickLookPreview($previewURL)
-            .alert("删除这个产物？", isPresented: Binding(
-                get: { pendingDelete != nil },
-                set: { if !$0 { pendingDelete = nil } }
-            ), presenting: pendingDelete) { item in
-                Button("删除", role: .destructive) { delete(item) }
-                Button("取消", role: .cancel) { pendingDelete = nil }
-            } message: { item in
-                Text(item.name + "\n\n文件会被删掉，对话记录里那条引用会变成失效链接。")
+            // 三个 alert（删除 / 改名 / 报错）合成一个。
+            //
+            // 三个 `.alert` 依次挂在同一个视图上是能编译的，但 iOS 15+
+            // 里同一个视图只可靠地弹最后一个 —— 前面那些经常点了没反应，
+            // 或者弹出来立刻消失。这是 SwiftUI 的老问题：每个 alert 都
+            // 往同一条 modifier 链上加 presentation，后加的把前面的顶掉。
+            //
+            // 改成单一 alert + 一个「当前要弹什么」的状态，三者互斥，
+            // 谁都不会被吞。删除和改名的正文要用到具体 item，
+            // 所以把 item 一起放进 enum 里带着走。
+            .alert(alertTitle, isPresented: Binding(
+                get: { activeAlert != nil },
+                set: { if !$0 { activeAlert = nil } }
+            ), presenting: activeAlert) { kind in
+                switch kind {
+                case .delete(let item):
+                    Button("删除", role: .destructive) { delete(item) }
+                    Button("取消", role: .cancel) { activeAlert = nil }
+                case .rename(let item):
+                    // renameText 在长按菜单里已经预填成原名了；这里把 item
+                    // 直接喂给 commitRename，不再从 @State 里反查「在改谁」——
+                    // 反查那条路在 alert 被系统中途撤掉时 item 会丢。
+                    TextField("新文件名", text: $renameText)
+                    Button("保存") { commitRename(item) }
+                    Button("取消", role: .cancel) { activeAlert = nil }
+                case .error:
+                    Button("好", role: .cancel) { activeAlert = nil }
+                }
+            } message: { kind in
+                Text(alertMessage(kind))
             }
-            .alert("改名", isPresented: Binding(
-                get: { renaming != nil },
-                set: { if !$0 { renaming = nil } }
-            )) {
-                TextField("新文件名", text: $renameText)
-                Button("保存") { commitRename() }
-                Button("取消", role: .cancel) { renaming = nil }
+        }
+    }
+
+    /// 同一时刻只允许一个 alert。原来的 pendingDelete / renaming /
+    /// errorText 三个 @State 合并成这一个，避免出现「两个都非 nil」
+    /// 时不知道该弹哪个。
+    private enum ActiveAlert: Identifiable {
+        case delete(ArtifactItem)
+        case rename(ArtifactItem)
+        case error
+
+        /// 改名要用到具体 item（拿原名比较、按原名改），
+        /// 所以 rename 也得带着它走 —— 不能只存一个「正在改名」的布尔。
+        var item: ArtifactItem? {
+            switch self {
+            case .delete(let i): return i
+            case .rename(let i): return i
+            case .error:         return nil
             }
-            .alert("出错了", isPresented: Binding(
-                get: { errorText != nil },
-                set: { if !$0 { errorText = nil } }
-            )) {
-                Button("好", role: .cancel) { errorText = nil }
-            } message: {
-                Text(errorText ?? "")
+        }
+
+        var id: String {
+            switch self {
+            case .delete(let item): return "del:\(item.id)"
+            case .rename(let item): return "ren:\(item.id)"
+            case .error:            return "error"
             }
+        }
+    }
+
+    private var alertTitle: String {
+        switch activeAlert {
+        case .delete(_): return "删除这个产物？"
+        case .rename(_): return "改名"
+        case .error:     return "出错了"
+        case nil:        return ""
+        }
+    }
+
+    private func alertMessage(_ kind: ActiveAlert) -> String {
+        switch kind {
+        case .delete(let item):
+            return item.name + "\n\n文件会被删掉，对话记录里那条引用会变成失效链接。"
+        case .rename(_):
+            return ""
+        case .error:
+            return errorText ?? ""
         }
     }
 
@@ -293,13 +345,13 @@ struct AllArtifactsView: View {
 
             Button {
                 renameText = item.name
-                renaming = item
+                activeAlert = .rename(item)
             } label: {
                 Label("改名", systemImage: "pencil")
             }
 
             Button(role: .destructive) {
-                pendingDelete = item
+                activeAlert = .delete(item)
             } label: {
                 Label("删除", systemImage: "trash")
             }
@@ -354,23 +406,34 @@ struct AllArtifactsView: View {
     }
 
     private func delete(_ item: ArtifactItem) {
-        pendingDelete = nil
+        activeAlert = nil
         do {
             try store.delete(item)
         } catch {
-            errorText = error.localizedDescription
+            raise(error)
         }
     }
 
-    private func commitRename() {
-        guard let item = renaming else { return }
+    private func commitRename(_ item: ArtifactItem) {
         let trimmed = renameText.trimmingCharacters(in: .whitespacesAndNewlines)
-        renaming = nil
+        activeAlert = nil
         guard !trimmed.isEmpty, trimmed != item.name else { return }
         do {
             try store.rename(item, to: trimmed)
         } catch {
-            errorText = error.localizedDescription
+            raise(error)
+        }
+    }
+
+    /// 弹报错。
+    ///
+    /// 不能直接 `activeAlert = .error`：此刻上一个 alert 正在退场动画里，
+    /// 同一个 modifier 上立刻换内容会被系统吞掉（点了删除失败，界面什么都不弹）。
+    /// 等一拍，等上一个的退场结束再上。
+    private func raise(_ error: Error) {
+        errorText = error.localizedDescription
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            activeAlert = .error
         }
     }
 }
