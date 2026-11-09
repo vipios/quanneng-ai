@@ -86,30 +86,23 @@ jobs:
       # 用固定的 DerivedData 路径，后面缓存和产物收集都认这个
       DERIVED: ${{ github.workspace }}/build
       CONFIG: ${{ inputs.configuration || 'Release' }}
-      # ── 内存控制：两层都得压，只压一层没用 ──
+      # ── 内存控制 ──
       #
-      # 症状（run #15 / #16 实测）：日志里零 error:、全是 warning，然后
-      # 蹦出 "Failed frontend command:" 和一行超长的 swift-frontend 命令，
-      # 紧接着 ** BUILD FAILED **。这不是代码错，是 swift-frontend 进程
-      # 被 OOM killer 干掉了 —— 它连 error 都来不及打印。
+      # ⚠️ 这里曾经写着 BUILD_JOBS / SWIFT_DRIVER_JOBS / SWIFT_COMPILATION_MODE
+      # 三个 env，并在注释里声称它们压住了内存。**那是错的，已删**：
       #
-      # 为什么单靠 xcodebuild -jobs 不够：
-      #   -jobs 控制的是「同时跑几个构建任务」，而一个 SwiftCompile 任务
-      #   内部还会按 CPU 核心数再并行起**多个** swift-frontend 进程。
-      #   macos-26 runner 是 3–4 核 / 7GB，默认能起十几个 frontend，
-      #   每个 1–2GB，必被 OOM。
+      #   xcodebuild 的 build settings 只从两个地方读 —— 命令行的 KEY=VALUE、
+      #   工程文件（pbxproj / xcconfig）。环境变量不在其列。写成 env: 的
+      #   SWIFT_COMPILATION_MODE 对 xcodebuild 完全透明，实际生效的一直是
+      #   pbxproj 里 project 级 Release 的 SWIFT_COMPILATION_MODE = wholemodule。
       #
-      # 所以三层一起压：
-      #   1. -jobs 4         → 少跑几个构建任务
-      #   2. SWIFT_DRIVER_JOBS 2 → 一个编译任务内部只并行 2 个 frontend
-      #   3. SWIFT_COMPILATION_MODE=wholemodule → Release 本来就是整模块
-      #      编，明确写出来避免增量模式额外驻留一份 AST
+      #   所以 run #15 / #16 / #24 一直是「按 WMO 编、被 OOM 杀掉」，
+      #   而日志看起来像是「加了内存控制还是挂」。真正的开关全部搬到
+      #   Build 步骤的命令行里，见那一步的注释。
       #
-      # 不要再加 SWIFT_ENABLE_EXPLICIT_MODULES=NO：它关掉显式模块后
-      # 同一个 module 会被重复构建，内存峰值反而更高。
-      BUILD_JOBS: 4
-      SWIFT_DRIVER_JOBS: 2
-      SWIFT_COMPILATION_MODE: wholemodule
+      # BUILD_JOBS 仍然有用：它被 Build 步骤当 `-jobs` 的参数读，那个是
+      # xcodebuild 自己的命令行选项，不涉及 build settings 的读取规则。
+      BUILD_JOBS: 2
 
     steps:
       # ── 0. 打印环境，失败时日志第一段就能定位是不是环境问题 ──
@@ -459,18 +452,57 @@ jobs:
       - name: Build
         id: build
         run: |
-          # 注意 flag 形态：
+          # ── flag 形态 ──
           #   -allowProvisioningUpdates 是开关，不能带值 —— 写成 "... NO" 会让
           #   xcodebuild 把 NO 当成 build action，直接报
           #   "xcodebuild: error: Unknown build action 'NO'."
           #   我们要的是"不做自动签名"，所以这个开关根本不加。
           #   CODE_SIGNING_ALLOWED=NO 这几个才是 key=value 形态。
           #
-          # 内存控制：见文件顶部 env 里 BUILD_JOBS / SWIFT_DRIVER_JOBS /
-          # SWIFT_COMPILATION_MODE 三条的说明。-jobs 只压构建任务数，
-          # 压不住一个任务内部并行起的多个 swift-frontend，所以还要
-          # SWIFT_DRIVER_JOBS 兜底（这条是 run #16 被 OOM 杀掉后补的）。
+          # ── 内存控制：只在命令行写才生效 ──
+          #
+          # run #24 的失败形态（这是第一次真正编到主 target）：
+          #   6144 行日志里 **零个 error:**，236 条全是 warning，
+          #   4 分钟就结束，末尾 "Failed frontend command:" 跟着一条
+          #   14KB 的 swift-frontend 命令，然后 ** BUILD FAILED **。
+          #   那条命令里写着 `-num-threads 3 -O`，filelist 是 sources-1
+          #   （主 target 全部 669 个 .swift）。
+          #   这不是代码错 —— 是 swift-frontend 被 OOM killer 干掉，
+          #   连 error 都来不及打印。
+          #
+          # 为什么之前的 env 没救回来：xcodebuild 的 build settings 只认
+          # 命令行 KEY=VALUE 和工程文件，不认环境变量。下面这三条才是
+          # 真正把它压下来的开关。
+          #
+          #   1. SWIFT_COMPILATION_MODE=singlefile
+          #      pbxproj 的 project 级 Release 写的是 wholemodule。WMO 下
+          #      **一个** frontend 进程要同时持有全部 669 个文件的 AST，
+          #      中途无法回收；-jobs 在这种模式下完全无效（压根没有第二个
+          #      job）。改成 singlefile 后，xcodebuild 会把文件切成多个
+          #      batch，每个 batch 编完就释放，峰值内存按 batch 大小决定。
+          #      代价是全模块优化变弱（跨文件内联减少）。Release 包体积会
+          #      略大、性能略降，但这是 7GB runner 上能出包的唯一路子。
+          #      要回全量优化，得换更大的 runner，不是加参数。
+          #
+          #   2. SWIFT_DRIVER_JOBS=1 / SWIFT_EXEC 并发
+          #      singlefile 模式下 xcodebuild 会并行开多个 frontend。
+          #      SWIFT_DRIVER_JOBS 限住一个 driver 内部并行几个；
+          #      -jobs 限住同时跑几个构建任务。两个都压到 1–2，
+          #      峰值 = 2 batch 并发 ≈ 1.5–2GB，7GB 装得下。
+          #
+          #   3. -quiet
+          #      日志从 1.2MB 降到几十 KB，失败时 tail 能直接截到错误，
+          #      不用再去下载 artifact 里的 build.log。warning 仍会打
+          #      （-quiet 只压 note 和进度），不影响诊断。
+          #
+          # 顺序不能调：所有 KEY=VALUE 必须在 build action 之前。
           set -o pipefail
+          echo "== 内存 : 见下 =="
+          echo "BUILD_JOBS(-jobs)=$BUILD_JOBS"
+          free -m 2>/dev/null || vm_stat | head -5
+          echo "CPU: $(sysctl -n hw.ncpu)"
+          echo "=========================="
+
           xcodebuild \
             -project src/ios/Minis.xcodeproj \
             -scheme Minis \
@@ -479,12 +511,56 @@ jobs:
             -destination 'generic/platform=iOS' \
             -derivedDataPath "$DERIVED" \
             -jobs "$BUILD_JOBS" \
+            -quiet \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGN_ENTITLEMENTS="" \
             ENABLE_BITCODE=NO \
-            build 2>&1 | tee build.log | tail -100
+            SWIFT_COMPILATION_MODE=singlefile \
+            SWIFT_DRIVER_JOBS=2 \
+            build 2>&1 | tee build.log | tail -150
+
+      # ── 6.5 判死因：OOM 还是代码错 ──
+      # Build 步骤失败时，两种死法的处理完全不同，但日志长得几乎一样
+      # （都是 "Failed frontend command" + BUILD FAILED）。这一步把两者分开，
+      # 让 Workflow Summary 一眼能看出该改参数还是改代码。
+      #
+      # 判据：
+      #   日志里 error: 数为 0，且出现 Failed frontend command
+      #     → swift-frontend 被杀（OOM）。改内存参数，别动代码。
+      #   日志里有 error:
+      #     → 真编译错。把那几行抽出来，其余不用看。
+      #
+      # 注入方式用 ::notice:: 而不是 exit 1：job 已经因为 Build 失败而红了，
+      # 这里再红一次只会把后面的 Collect artifacts / Upload artifacts 一起
+      # 掐掉 —— 那两步要留 artifact 给本地下载 build.log，比这里的诊断值钱。
+      - name: Diagnose failure
+        if: failure()
+        run: |
+          if [ ! -f build.log ]; then
+            echo "::warning::没有 build.log，构建步骤没产出日志"
+            exit 0
+          fi
+
+          ERRS=$(grep -cE '(^|: )error: ' build.log || true)
+          FRONTEND=$(grep -c 'Failed frontend command' build.log || true)
+
+          echo "error: 条数 = $ERRS"
+          echo "Failed frontend command = $FRONTEND"
+
+          if [ "$ERRS" = "0" ] && [ "$FRONTEND" != "0" ]; then
+            echo "::error::判定 OOM —— 零 error 但 frontend 被杀。不是代码问题，见 Build 步骤里 SWIFT_COMPILATION_MODE 的注释。"
+            echo "被杀时的并发参数："
+            grep -oE '\-num-threads [0-9]+' build.log | head -3 || true
+          elif [ "$ERRS" != "0" ]; then
+            echo "::error::判定真编译错 —— 有 $ERRS 条 error:"
+            grep -E '(^|: )error: ' build.log | head -40
+          else
+            echo "::warning::既没有 error 也没有 frontend 失败，看 Summary 与完整 build.log"
+          fi
+          # 不 exit 1：job 已经红了，这里只负责给出判定
+          exit 0
 
       # ── 7. 收集产物：同时出 .app zip 和 .ipa ──
       - name: Collect artifacts
