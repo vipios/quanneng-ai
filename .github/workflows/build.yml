@@ -58,8 +58,14 @@ on:
 
   push:
     branches: [main]
+    # 这里曾经只写 '.github/workflows/build.yml' 一条，结果是：
+    # 改了 Swift / pbxproj 推上去，什么都不跑，还得手动 dispatch 一次。
+    # 出包是这个仓库唯一的产出，源码变了就该跑。文档和截图不触发。
     paths:
       - '.github/workflows/build.yml'
+      - 'src/ios/**'
+      - 'deps/**'
+      - 'scripts/**'
 
 # 同一分支只跑一个，新的顶掉旧的 —— macOS runner 按 10 倍计费，
 # 排队跑两份等于白烧额度
