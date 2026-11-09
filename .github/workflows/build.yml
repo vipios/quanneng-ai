@@ -119,19 +119,54 @@ jobs:
           #
           # lld 不是 keg-only，formula 里用 link_overwrite 直接装进
           # /opt/homebrew/bin/{ld.lld,lld}，所以不用额外改 PATH。
-          brew install --quiet go meson libarchive pkg-config llvm ninja lld
-          echo "$(brew --prefix go)/bin" >> "$GITHUB_PATH"
+          #
+          # 注意这里故意不装 go —— 版本必须钉死，见下一步。
+          brew install --quiet meson libarchive pkg-config llvm ninja lld
           echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
           # meson 装到 brew 的 python 里，确保 PATH 能找到
           echo "$(brew --prefix)/bin" >> "$GITHUB_PATH"
+
+      # Go 版本必须钉死，不能用 brew 的最新版。
+      # deps/rclone-mobile/go.mod 声明 go 1.25.5，其中间接依赖
+      # go-json-experiment/json 是按 1.25 的 encoding/json 内部 API 写的；
+      # 换到 1.27 会直接编译失败：
+      #   alias.go:618:21: undefined: json.SkipFunc
+      #   alias.go:957:14: undefined: json.DiscardUnknownMembers
+      # 装 1.25 分支最新补丁版，既不碰上游 go.mod，也留了安全修复。
+      - name: Install Go 1.25.x
+        run: |
+          set -e
+          GO_VER="1.25.14"
+          GO_SHA="5b26c0b6f308240fca2614fb02f622cfcc8c0cc3b69c78bba4845489a4590259"
+          GO_TARBALL="go${GO_VER}.darwin-arm64.tar.gz"
+          GO_ROOT="$RUNNER_TEMP/goroot"
+
+          echo "downloading go${GO_VER}"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/$GO_TARBALL" \
+            "https://go.dev/dl/$GO_TARBALL"
+
+          # 校验 sha256：拿错包 / 被劫持 / 下载截断，这里就拦住
+          echo "$GO_SHA  $RUNNER_TEMP/$GO_TARBALL" | shasum -a 256 -c -
+
+          rm -rf "$GO_ROOT"
+          mkdir -p "$GO_ROOT"
+          tar -C "$GO_ROOT" --strip-components=1 -xzf "$RUNNER_TEMP/$GO_TARBALL"
+
+          "$GO_ROOT/bin/go" version
+          echo "$GO_ROOT/bin" >> "$GITHUB_PATH"
 
       - name: Verify toolchain
         run: |
           set -e
           # GITHUB_PATH 是给后续步骤用的，本步骤里不生效，自己补一次
-          export PATH="$(brew --prefix llvm)/bin:$(brew --prefix go)/bin:$(brew --prefix)/bin:$PATH"
+          export PATH="$RUNNER_TEMP/goroot/bin:$(brew --prefix llvm)/bin:$(brew --prefix)/bin:$PATH"
 
           go version
+          # 挡住 Go 版本又漂回新版 —— 那样 rclone 会以一堆 undefined 报错
+          if ! go version | grep -q 'go1\.25\.'; then
+            echo "::error::Go 版本不是 1.25.x，rclone 会编译失败（见 Install Go 1.25.x 的注释）"
+            exit 1
+          fi
           meson --version
           ninja --version
           echo "llvm: $(brew --prefix llvm)"
@@ -212,7 +247,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: deps/frameworks/Rclone.xcframework
-          key: rclone-${{ steps.depskey.outputs.h2 }}
+          key: rclone-go1.25-${{ steps.depskey.outputs.h2 }}
 
       - name: Restore rootfs cache
         id: c_rootfs
@@ -244,7 +279,7 @@ jobs:
         run: ./deps/build_lame.sh
 
       - name: Save LAME cache
-        if: always() && steps.c_lame.outputs.cache-hit != 'true'
+        if: success() && steps.c_lame.outputs.cache-hit != 'true'
         continue-on-error: true
         uses: actions/cache/save@v4
         with:
@@ -256,7 +291,7 @@ jobs:
         run: ./deps/build_ffmpeg.sh
 
       - name: Save FFmpeg cache
-        if: always() && steps.c_ff.outputs.cache-hit != 'true'
+        if: success() && steps.c_ff.outputs.cache-hit != 'true'
         continue-on-error: true
         uses: actions/cache/save@v4
         with:
@@ -268,7 +303,7 @@ jobs:
         run: ./deps/build_ish.sh
 
       - name: Save iSH cache
-        if: always() && steps.c_ish.outputs.cache-hit != 'true'
+        if: success() && steps.c_ish.outputs.cache-hit != 'true'
         continue-on-error: true
         uses: actions/cache/save@v4
         with:
@@ -289,7 +324,7 @@ jobs:
           fi
 
       - name: Save rootfs cache
-        if: always()
+        if: success()
         continue-on-error: true
         uses: actions/cache/save@v4
         with:
@@ -300,13 +335,16 @@ jobs:
         if: steps.c_rclone.outputs.cache-hit != 'true'
         run: ./deps/build_rclone_ios.sh
 
+      # 这里必须是 success() 而不是 always()：构建失败时目录里可能留了
+      # 半成品 xcframework，存进缓存会被下一轮当成"已命中"直接复用，
+      # 一路错到链接阶段。LAME/FFmpeg/iSH 同理，见各自 save 步骤。
       - name: Save rclone cache
-        if: always() && steps.c_rclone.outputs.cache-hit != 'true'
+        if: success() && steps.c_rclone.outputs.cache-hit != 'true'
         continue-on-error: true
         uses: actions/cache/save@v4
         with:
           path: deps/frameworks/Rclone.xcframework
-          key: rclone-${{ steps.depskey.outputs.h2 }}
+          key: rclone-go1.25-${{ steps.depskey.outputs.h2 }}
 
       - name: Verify native deps
         run: |
