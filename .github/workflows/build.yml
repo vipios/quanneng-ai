@@ -238,7 +238,8 @@ jobs:
           path: |
             deps/libs
             deps/include
-          key: ish-${{ steps.depskey.outputs.h2 }}
+            deps/resources/RootfsPatch.bundle
+          key: ish-v2-${{ steps.depskey.outputs.h2 }}
 
       # rclone 也写进 deps/frameworks，单独缓存，
       # 否则 FFmpeg 缓存的还原会把 Rclone.xcframework 一起盖掉。
@@ -273,6 +274,39 @@ jobs:
           find deps/lame-3.100 -name 'depcomp' -o -name 'config.guess' -o -name 'config.sub' \
                -o -name 'ltmain.sh' -o -name 'missing' -o -name 'compile' 2>/dev/null | xargs chmod +x 2>/dev/null || true
           git ls-files -s deps/build_ish.sh deps/build_lame.sh deps/build_ffmpeg.sh
+
+      # rootfs 资源兜底：deps/resources/ 整体被 gitignore，靠 build_ish.sh 复制。
+      # 但 Build iSH 命中缓存时会整个跳过，那一步的复制也就没执行 ——
+      # 结果 deps/resources/ 只有 rootfs zip，缺 RootfsPatch.bundle，
+      # xcodebuild 编到 CpResource 才报 "couldn't be opened because there is
+      # no such file"，前面 30 分钟全白跑。
+      # 这里无条件补一次：源在子模块里，复制成本几乎为零。
+      - name: Ensure rootfs resources
+        run: |
+          set -e
+          mkdir -p deps/resources
+
+          SRC="deps/ish/app/RootfsPatch.bundle"
+          DST="deps/resources/RootfsPatch.bundle"
+          if [ -d "$DST" ]; then
+            echo "OK   $DST 已存在"
+          elif [ -d "$SRC" ]; then
+            cp -R "$SRC" "$DST"
+            echo "COPIED  $SRC -> $DST"
+          else
+            echo "::error::$SRC 不存在，工程硬引用这个 bundle，缺了必然编译失败"
+            exit 1
+          fi
+
+          # 工程里所有 dei/resources 下的硬引用，逐个确认在不在
+          for f in deps/resources/alpine-rootfs.zip deps/resources/RootfsPatch.bundle; do
+            if [ -e "$f" ]; then
+              echo "OK   $f"
+            else
+              echo "::error::缺 $f —— xcodebuild 会在 CpResource 阶段失败"
+              exit 1
+            fi
+          done
 
       - name: Build LAME
         if: steps.c_lame.outputs.cache-hit != 'true'
@@ -310,7 +344,8 @@ jobs:
           path: |
             deps/libs
             deps/include
-          key: ish-${{ steps.depskey.outputs.h2 }}
+            deps/resources/RootfsPatch.bundle
+          key: ish-v2-${{ steps.depskey.outputs.h2 }}
 
       - name: Prepare Alpine rootfs
         run: |
