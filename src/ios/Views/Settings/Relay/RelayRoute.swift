@@ -90,18 +90,33 @@ struct RelayRoute: Equatable {
 
 enum RelayProbe {
 
-    /// 判定超时。内网正常 70ms，给 1.2 秒已经很宽松；
-    /// 超过就当不通 —— 宁可判「在外」走域名，也不能让界面卡着。
+    /// 第一轮判定超时。内网正常 70ms，1.2 秒已经很宽松。
     static let timeout: TimeInterval = 1.2
+
+    /// 第二轮兜底超时。只在第一轮**判失败**时补一次。
+    ///
+    /// 为什么要补：家里 WiFi 抖动 / 路由器负载高（实测那台 MT7621 只有
+    /// 116 MB 内存，采集时可用仅 6 MB）时，`/health` 偶尔真的会慢过 1.2 秒。
+    /// 漏判一次的代价不是「慢一点」，而是**整轮请求走域名白慢 35 倍**
+    /// （实测内网 0.07s vs 域名 2.5s）。多花 2.5 秒换掉这个漏判，划算。
+    static let timeoutRetry: TimeInterval = 2.5
 
     /// **唯一入口**：现在该走哪条线。
     ///
     /// 只探用户配置的家里地址，一个请求，不扫网段、不改配置。
+    ///
+    /// 两段式：先 1.2 秒试一次；不通再给 2.5 秒试一次。
+    /// 第一次就通的话不会有任何额外延迟。
     static func resolve() async -> RelayRoute {
         let home = RelayVault.shared.homeHost
         let away = RelayVault.shared.awayHost
 
-        let ok = await reachable(home: home)
+        var ok = await reachable(home: home, timeout: timeout)
+        if !ok {
+            RelayLog.log("判定：第一轮 \(timeout)s 没通，补一次 \(timeoutRetry)s 重试")
+            ok = await reachable(home: home, timeout: timeoutRetry)
+        }
+
         let route = ok ? RelayRoute(kind: .lan, host: home)
                        : RelayRoute(kind: .wan, host: away)
 
@@ -114,7 +129,9 @@ enum RelayProbe {
     /// 判据用 relay 的 `/health`：
     ///   {"status":"ok","service":"ai-relay",...}
     /// 认 `service` 字段而不是「有 HTTP 响应就算通」—— 见文件头第三条。
-    static func reachable(home: String) async -> Bool {
+    ///
+    /// - Parameter timeout: 本次探测的超时。第一轮 1.2s，兜底轮 2.5s。
+    static func reachable(home: String, timeout: TimeInterval = RelayProbe.timeout) async -> Bool {
         let host = RelayVault.cleanHost(home)
         guard !host.isEmpty, let url = URL(string: "http://\(host):8080/health") else {
             return false
