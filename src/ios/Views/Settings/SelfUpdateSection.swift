@@ -178,7 +178,15 @@ struct SelfUpdateSection: View {
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         .font(.system(.body, design: .monospaced))
-                        .onChange(of: draft) { _, _ in draftInvalid = false }
+                        // 单参数闭包，不是偷懒：两参数的
+                        //   onChange(of:initial:_:) { oldValue, newValue in }
+                        // 要 iOS 17+，而本工程部署目标是 16.0（pbxproj 里
+                        // IPHONEOS_DEPLOYMENT_TARGET = 16.0）。写两参数会报
+                        //   error: 'onChange(of:initial:_:)' is only available
+                        //          in iOS 17.0 or newer
+                        // 单参数版 onChange(of:perform:) 在 iOS 17 起标记废弃，
+                        // 只是 warning，16/26 都能跑 —— 这里要的是兼容，不是新写法。
+                        .onChange(of: draft) { _ in draftInvalid = false }
                 } header: {
                     Text("更新源仓库")
                 } footer: {

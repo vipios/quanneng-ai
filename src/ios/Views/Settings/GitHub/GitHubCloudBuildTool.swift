@@ -125,6 +125,20 @@ enum GitHubCloudBuildTool {
             }
             return ("Error: 代码推上去了（commit \(commitSha.prefix(7))），但触发 workflow 失败 —— "
                     + (e.errorDescription ?? "未知错误"), false)
+        } catch {
+            // 必须留这个兜底 catch。
+            //
+            // 上面那个 `catch let e as GitHubPushError` 是**带类型筛选**的，
+            // Swift 不认为它把 Error 捕获穷尽了 —— 编译器只认裸 `catch`
+            // 或者能证明覆盖全部 Error 类型的分支。缺它就会报：
+            //   error: errors thrown from here are not handled because the
+            //          enclosing catch is not exhaustive
+            // 这一点和 100~106 行那次推送不同：那次我写了兜底，这次漏了。
+            //
+            // 实际能走到这里的是 dispatchWorkflow 内部抛出的非 GitHubPushError
+            // （网络层直接把 URLError 透出来时）。语义上等于推送成功、触发失败。
+            return ("Error: 代码推上去了（commit \(commitSha.prefix(7))），但触发 workflow 失败 —— "
+                    + error.localizedDescription, false)
         }
 
         // ── 等一小会儿拿到 run ─────────────────────────────────
