@@ -209,14 +209,53 @@ struct TemplateUIWebView: UIViewRepresentable {
 
         host.webView = wv
 
-        guard let url = Bundle.main.url(forResource: "ui",
+        // [R41-界面热更新] 先找沙箱里的 ui.html，没有再回落到 bundle。
+        //
+        // 为什么加这个：这个界面的全部内容（抽屉、设置、聊天外壳）都是
+        // 这份 html 渲染的，Swift 只负责把它装进 WKWebView。可是它被打包
+        // 进了 App bundle，于是「改一行 CSS」也要走一次完整构建 ——
+        // 而这个工程 670 个源文件全量编译要 20 分钟。为了一个 margin
+        // 等 20 分钟，反馈环长到没法调交互。
+        //
+        // 现在：把 ui.html 丢进 App 沙箱的 Documents/UITemplate/ 下，
+        // 重启 App 就生效，零编译。沙箱路径（TrollStore 装的包）：
+        //   /var/mobile/Containers/Data/Application/<UUID>/Documents/UITemplate/ui.html
+        //
+        // 顺序不能反：一定要**先**沙箱后 bundle。反过来的话沙箱那份
+        // 永远被忽略，热更新就是假的。
+        //
+        // 安全边界：只允许 Documents/UITemplate 这一个目录，且文件名
+        // 写死 ui.html —— 不是「读任意传入路径」，不会变成任意文件读取。
+        let sandboxURL = Self.sandboxTemplateURL()
+        let bundleURL = Bundle.main.url(forResource: "ui",
                                         withExtension: "html",
-                                        subdirectory: "UITemplate") else {
+                                        subdirectory: "UITemplate")
+
+        if let s = sandboxURL {
+            wv.loadFileURL(s, allowingReadAccessTo: s.deletingLastPathComponent())
+            return wv
+        }
+
+        guard let url = bundleURL else {
             host.jsError = "bundle 里找不到 UITemplate/ui.html"
             return wv
         }
         wv.loadFileURL(url, allowingReadAccessTo: url.deletingLastPathComponent())
         return wv
+    }
+
+    /// 沙箱里的 ui.html。不存在返回 nil。
+    ///
+    /// 用 `urls(for:.documentDirectory)` 而不是拼绝对路径 ——
+    /// 容器 UUID 每次重装都会变，写死路径必然失效。
+    static func sandboxTemplateURL() -> URL? {
+        guard let docs = FileManager.default.urls(
+            for: .documentDirectory, in: .userDomainMask).first
+        else { return nil }
+        let f = docs
+            .appendingPathComponent("UITemplate", isDirectory: true)
+            .appendingPathComponent("ui.html")
+        return FileManager.default.fileExists(atPath: f.path) ? f : nil
     }
 
     func updateUIView(_ wv: WKWebView, context: Context) {

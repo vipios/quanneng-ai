@@ -49,7 +49,23 @@ final class DrawerState: ObservableObject {
 
     /// 从屏幕左边缘起手多少点之内才算「拉抽屉」。
     /// 少了这个阈值，普通左滑返回会变成拉开抽屉。
-    static let edgeSlop: CGFloat = 24
+    ///
+    /// [R41-左滑不灵敏] 24 → 32。
+    ///
+    /// 24pt 对拇指来说太苛刻：iPhone 上单手操作时，手指自然落点常在
+    /// 边缘往里 25-40pt 的位置，落在 24 之外就变成「滑了没反应」。
+    /// 用户反馈的「不灵敏」主要就是这一段死区。
+    ///
+    /// 为什么只加到 32 而不是更大：这一层在 ZStack 最上层且
+    /// `point(inside:)` 只在这条带子里返回 true，带子越宽，聊天界面上
+    /// 能被它吃掉触摸的区域就越大 —— 左边缘那一条里的按钮会点不动。
+    /// 32 是「够拇指够到」和「不吃掉内容点击」之间的折中。
+    ///
+    /// 和 ui.html 里 JS 的 40px 起手区不是一回事，两者分工：
+    ///   · Swift 这条带子负责「JS 还没接管时先把手指接住」；
+    ///   · JS 拿到 pointerdown 后自己再看 40px 决定要不要跟手。
+    ///   JS 的判定更宽，所以只要 Swift 接住了，JS 一定也会接 —— 不会互相推诿。
+    static let edgeSlop: CGFloat = 32
 
     /// 吸附判定：拖过这个比例就往「展开」吸，否则往「收起」吸。
     static let settleThreshold: CGFloat = 0.4
@@ -425,7 +441,6 @@ private struct EdgePanOverlay: UIViewRepresentable {
             guard let pan = g as? UIPanGestureRecognizer, let view = pan.view else { return false }
 
             let v = pan.velocity(in: view)
-            let location = pan.location(in: view)
             let isOpen = state.progress > 0.02
 
             // 1) 方向过滤：水平位移必须明显大于垂直。
@@ -436,11 +451,27 @@ private struct EdgePanOverlay: UIViewRepresentable {
             if isOpen {
                 // 2a) 抽屉开着：只认「往左拖」（收回去）
                 return v.x < 0
-            } else {
-                // 2b) 抽屉关着：必须往右拖，且起手点在左边窄带内
-                guard v.x > 0 else { return false }
-                return location.x <= DrawerState.edgeSlop
             }
+
+            // 2b) 抽屉关着：必须往右拖，且**起手点**在左边窄带内。
+            //
+            // [R41-左滑不灵敏] 这里原来写的是
+            //     let location = pan.location(in: view)
+            //     return location.x <= DrawerState.edgeSlop
+            // 错在用「当前位置」判「起手位置」。
+            //
+            // gestureRecognizerShouldBegin 不是手指按下时调的，而是
+            // pan 已经认定「开始拖动」之后才调的 —— 那时手指早就往右
+            // 移了十几二十点。32pt 的带子减掉这段位移只剩 10pt 出头，
+            // 于是绝大多数从边缘起手的滑动都被判死，用户看到的就是
+            // 「左滑不灵敏、要多试几次」。
+            //
+            // 正确做法是用 pan 的起点（translation 反推）——
+            // translation 从手势开始累积，所以起点 = 当前点 - 位移。
+            let loc = pan.location(in: view)
+            let t = pan.translation(in: view)
+            let startX = loc.x - t.x
+            return startX <= DrawerState.edgeSlop
         }
     }
 }

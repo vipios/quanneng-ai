@@ -265,8 +265,23 @@
     transform:translateX(-318px);
     transition:transform .34s cubic-bezier(.32,.72,0,1);
     box-shadow:2px 0 24px rgba(0,0,0,.14);
+    /* [R41-齿轮叠层] 收起来时必须彻底退场。
+       原来只靠 transform 挪到屏幕外，元素本身仍然在文档流里占着
+       z-index:41 —— 比 .page 的 30 高。只要有任何一次「关抽屉 +
+       同时开页面」的动作，抽屉就在滑走的那 340ms 里盖在设置页上面，
+       看起来就是「设置页显示在抽屉里」。
+       visibility 在 transition 结束后才生效（下面 delay 对齐 340ms），
+       这样滑出动画还是看得见，滑完就直接不参与命中测试。 */
+    visibility:hidden;
+    transition:transform .34s cubic-bezier(.32,.72,0,1),
+               visibility 0s linear .34s;
   }
-  .drawer.open{transform:translateX(0);}
+  .drawer.open{
+    transform:translateX(0);
+    visibility:visible;
+    transition:transform .34s cubic-bezier(.32,.72,0,1),
+               visibility 0s linear 0s;
+  }
   .drawer-inner{
     flex:1;display:flex;flex-direction:column;min-height:0;
     padding:52px 0 0;position:relative;
@@ -4578,12 +4593,42 @@ function openDrawer(){
   scrim.style.pointerEvents = 'auto';
   edgeHint.classList.add('gone');
 }
+
+/* 关抽屉。**返回一个等动画结束才 resolve 的 Promise。**
+ *
+ * 为什么必须能等：任何「关抽屉 + 立刻切到另一个页面」的入口
+ * （目前是齿轮 → 设置），如果在动画还在跑的时候就加 .page.in，
+ * 抽屉会盖着新页面滑出去 —— 用户看到的是「设置页显示在抽屉里面」。
+ * 之前齿轮就是这么写的：closeDrawer(); enterSettings();
+ * 两条同步执行，视觉上必然重叠 340ms。
+ *
+ * 超时兜底：transitionend 在有些情况下不会触发（元素被隐藏、
+ * 动画被打断、WebView 掉帧）。所以配一个 380ms 的定时器，谁先到算谁。
+ * 380 = 340ms 动画 + 一点余量。不能省这个兜底 —— 万一事件丢了，
+ * 齿轮就变成「点了没反应」，比叠层更难查。
+ */
 function closeDrawer(){
   state.drawerOpen = false;
   drawer.classList.remove('open');
   drawer.style.transform = `translateX(${-DRAWER_W}px)`;
   scrim.style.opacity = 0;
   scrim.style.pointerEvents = 'none';
+
+  return new Promise(resolve => {
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      drawer.removeEventListener('transitionend', onEnd);
+      resolve();
+    };
+    const onEnd = (e) => {
+      // 只认抽屉自己的 transform，遮罩的 opacity 结束不算
+      if (e.target === drawer && e.propertyName === 'transform') finish();
+    };
+    drawer.addEventListener('transitionend', onEnd);
+    setTimeout(finish, 380);
+  });
 }
 scrim.addEventListener('click', closeDrawer);
 
@@ -4592,8 +4637,45 @@ scrim.addEventListener('click', closeDrawer);
  * 既拉不出抽屉、也点不到里面的对话行，只能先按返回。现在抽屉的 z-index
  * 已经高于 .page，不再需要这条限制。 */
 let dragging = false, dragStartX = 0, dragMoved = false;
+/* [R41-左滑不灵敏] 判方向用。
+ * dragStartY：起手时的纵坐标，用来比较横/纵位移谁大；
+ * dragDirLocked：一旦判定「这次是拉抽屉」就锁住，
+ *   中途不再改主意 —— 否则手指先横后竖时抽屉会跟着抖。 */
+let dragStartY = 0;
+let dragDirLocked = false;
+/* [R41-左滑丝滑] 拖动速度（px/ms）。抬手时用来判断「快甩」：
+ * 快甩一小段距离也应该拉开抽屉，这是 iOS 原生抽屉的手感。 */
+let dragSpeed = 0;
+let dragLastX = 0;
+let dragLastT = 0;
 let leftDragging = false;          // 抽屉开着时往回滑关闭
 let leftMoved = false;             // 是否真的拖动过（区分点击与滑动）
+
+/* [R41-左滑丝滑] 把拖拽期间的样式写入合并到每帧一次。
+ *
+ * 为什么需要：pointermove 在 iPhone 上能到 120Hz，每次回调都直接写
+ * transform + opacity，会让样式重算排在合成之前，手指快速移动时
+ * 画面落后于手指 —— 用户描述的「不丝滑」就是这个。
+ * 用 rAF 合并，一帧只写一次，写到的是「这一帧最新」的位置。
+ *
+ * 只存两个数，闭包里不持有 DOM 引用，避免热重载时抓到旧节点。
+ */
+let drawerFrameRaf = 0;
+let pendingTx = 0;
+let pendingOpacity = 0;
+
+function scheduleDrawerFrame(tx, opacity){
+  pendingTx = tx;
+  pendingOpacity = opacity;
+  if (drawerFrameRaf) return;
+  drawerFrameRaf = requestAnimationFrame(() => {
+    drawerFrameRaf = 0;
+    drawer.style.transform = `translateX(${pendingTx - DRAWER_W}px)`;
+    scrim.style.opacity = String(pendingOpacity);
+    // 只有真的拉开了才让遮罩可点，避免盖住底下聊天界面的输入框
+    scrim.style.pointerEvents = pendingTx > 2 ? 'auto' : 'none';
+  });
+}
 
 function canEdgeDrag(){
   if(state.drawerOpen) return false;
@@ -4613,14 +4695,38 @@ screenEl.addEventListener('pointerdown', e=>{
   dragStartX = e.clientX;
 });
 
-/* 抽屉关着时，从左侧边缘 30px 内起手就往右跟手拉出 */
+/* 抽屉关着时，从左侧边缘起手就往右跟手拉出。
+ *
+ * [R41-左滑不灵敏] 原来这里有三个问题，用户反馈「不灵敏、不丝滑」：
+ *
+ * ① 起手区只有 30px，而 Swift 那层 EdgePanOverlay 是 24pt ≈ 24px。
+ *    两层判定不一致，手指落在 24~30 之间时 Swift 认为「该我管」、
+ *    JS 认为「不该我管」，两边都不动 —— 表现为「滑了没反应」。
+ *    统一到 40px（比 Swift 的 24 更宽，保证 JS 先接上，因为
+ *    真正做视觉跟手的是 JS）。
+ *
+ * ② 没有判竖直方向。手指在边缘往下滚列表时，x 位移也会超过
+ *    几个像素，于是抽屉被拉出一点点又弹回去，看着像抖了一下。
+ *    现在记录起点 y，只有横向位移明显大于纵向才认作「拉抽屉」。
+ *
+ * ③ pointerdown 只判了「不满足就 return」，没有把上一次残留的
+ *    dragging 清掉。上次手势异常中断（比如切到别的 App）后
+ *    dragging 可能还是 true，下一次任意移动都会去拽抽屉。
+ *    这里在起手时显式归零。 */
 screenEl.addEventListener('pointerdown', e=>{
   if(!canEdgeDrag()) return;
   const r = screenEl.getBoundingClientRect();
   const x = e.clientX - r.left;
-  if(x > 30) return;                     // 只有真的从边缘起手才跟
-  dragging = true; dragMoved = false;
+  if(x > 40) return;                     // 只有真的从边缘起手才跟
+
+  dragging = true;
+  dragMoved = false;
   dragStartX = e.clientX;
+  dragStartY = e.clientY;                // 用来判横向/纵向
+  dragDirLocked = false;                 // 还没锁定方向
+  dragSpeed = 0;                         // 速度归零，别带着上一次的
+  dragLastX = e.clientX;
+  dragLastT = (typeof e.timeStamp === 'number' && e.timeStamp) ? e.timeStamp : performance.now();
   drawer.style.transition = 'none';
   scrim.style.transition = 'none';
 });
@@ -4641,11 +4747,53 @@ window.addEventListener('pointermove', e=>{
     return;
   }
   if(!dragging) return;
-  const dx = Math.max(0, Math.min(DRAWER_W, e.clientX - dragStartX));
+
+  // [R41-左滑不灵敏] 先判方向，再决定要不要动抽屉。
+  //
+  // 判定规则：横向位移必须明显大于纵向（1.5 倍以上）才认为是拉抽屉。
+  // 之所以不等「纵向大就彻底放弃」，是因为边缘起手时很多人手指
+  // 是先斜着出去的，一上来就判死会让人觉得「划不动」。
+  // 所以用「锁定」而不是「放弃」：
+  //   · 还没锁定 + 横 > 纵*1.5  → 锁定为拉抽屉，之后一直跟手；
+  //   · 还没锁定 + 纵 > 横       → 不抢，让列表自己滚（dragging 置 false）；
+  //   · 已锁定                   → 无条件跟手，不再重新判断。
+  const rawDx = e.clientX - dragStartX;
+  const rawDy = e.clientY - dragStartY;
+
+  // 顺便算瞬时速度（px/ms）。用指数平滑，避免单帧抖动把值打飞。
+  {
+    const t = (typeof e.timeStamp === 'number' && e.timeStamp) ? e.timeStamp : performance.now();
+    const dt = t - dragLastT;
+    if (dt > 0) {
+      const inst = (e.clientX - dragLastX) / dt;
+      dragSpeed = dragSpeed * 0.6 + inst * 0.4;
+      dragLastX = e.clientX;
+      dragLastT = t;
+    }
+  }
+
+  if (!dragDirLocked) {
+    if (rawDx > 8 && rawDx > Math.abs(rawDy) * 1.5) {
+      dragDirLocked = true;             // 确认是横向拉抽屉
+    } else if (Math.abs(rawDy) > 10 && Math.abs(rawDy) > Math.abs(rawDx)) {
+      // 用户其实在滚列表，退出，别再干扰
+      dragging = false;
+      drawer.style.transition = '';
+      scrim.style.transition = '';
+      drawer.style.transform = `translateX(${-DRAWER_W}px)`;
+      scrim.style.opacity = '0';
+      scrim.style.pointerEvents = 'none';
+      return;
+    } else {
+      return;                            // 位移还太小，先不动
+    }
+  }
+
+  const dx = Math.max(0, Math.min(DRAWER_W, rawDx));
   if(dx > 6) dragMoved = true;
-  drawer.style.transform = `translateX(${dx - DRAWER_W}px)`;
-  scrim.style.opacity = (dx / DRAWER_W);
-  if(dx > 2) scrim.style.pointerEvents = 'auto';
+  // 用 requestAnimationFrame 合并写入：pointermove 一秒能来 120 次，
+  // 每次都写 transform 会让合成器排不上队，手感发涩。
+  scheduleDrawerFrame(dx, dx / DRAWER_W);
 });
 
 window.addEventListener('pointerup', e=>{
@@ -4663,12 +4811,33 @@ window.addEventListener('pointerup', e=>{
   }
   if(!dragging) return;
   dragging = false;
+  // [R41] 清掉方向锁，否则下一次起手会带着上一次的判定
+  dragDirLocked = false;
+
   drawer.style.transition = '';
   scrim.style.transition = '';
+
   const dx = e.clientX - dragStartX;
-  if(dx > DRAWER_W * 0.34 || (dragMoved && dx > 90)){
+
+  // [R41-左滑不灵敏] 降低打开门槛。
+  //
+  // 原来是 DRAWER_W*0.34 ≈ 108px 或「拖过 90px」。108px 大约要滑掉
+  // 屏幕宽度的三分之一，手指短一点的人一次滑不到位，抽屉就弹回去，
+  // 主观上就是「不灵敏」「划不开」。
+  //
+  // 改成两个更友好的判据，任一满足就开：
+  //   ① 走过抽屉宽度的 22%（≈70px）；
+  //   ② 只要真的拖动过、且超过 45px。
+  // 另外加一条速度判据：抬手前那一小段位移够快，也算「用户想拉开」，
+  // 这是 iOS 原生抽屉的常见手感（快甩一下不要求距离）。
+  const speed = dragSpeed;              // px/ms，在 pointermove 里算
+  const flick = speed > 0.45 && dx > 24;
+
+  if (dx > DRAWER_W * 0.22 || (dragMoved && dx > 45) || flick) {
     openDrawer();
   } else {
+    // 取消时别用 closeDrawer()：它会等 380ms 再 resolve，而这里
+    // 根本不需要等动画。直接收回去更利落。
     closeDrawer();
   }
 });
@@ -4694,13 +4863,33 @@ function openPage(name){
     el.classList.add('in');
   }));
 }
+
+/* 关掉一个覆盖页。
+ *
+ * [R41-返回卡死] 原来这里只给**指定的那一个**页面摘 .in，然后
+ * state.page = 'chat' 收工。问题在于所有 .page 的 z-index 都是 30，
+ * 谁在上层完全由 DOM 顺序决定（pageMiniSys 在最后，所以它最上层）。
+ * 只要有任何一次操作让两个页面同时带 .in（比如 设置 → 技能，
+ * openPage('skills') 给技能页加了 .in 但没摘设置页的），
+ * 点返回时那个「多出来」的页面还开着，盖在聊天界面上面 ——
+ * 表现就是「返回后卡住、点哪都没反应」，因为它是个半透明的空壳。
+ *
+ * 所以这里改成：不管关的是哪个，**把所有覆盖页的 .in 一起摘掉**。
+ * 这个 App 的页面结构是「同时只有一页盖在聊天上」，没有真正的
+ * 页面栈，所以全清是正确语义，不是粗暴兜底。
+ *
+ * 注意保留按 name 取消 rAF 的那段：如果那一页刚 openPage 还没
+ * 执行到 rAF 就被关了，不取消的话回调会又把 .in 加回来。
+ */
 function closePage(name){
-  const el = $('page' + name.charAt(0).toUpperCase() + name.slice(1));
-  if(!el) return;
-  // 取消尚未执行的「加 .in」，否则关掉的页会被 rAF 重新打开
-  const pending = pageRaf.get(el);
-  if (pending) { cancelAnimationFrame(pending); pageRaf.delete(el); }
-  el.classList.remove('in');
+  // 先取消所有未执行的「加 .in」，否则关掉的页会被 rAF 重新打开
+  pageRaf.forEach((handle) => cancelAnimationFrame(handle));
+  pageRaf.clear();
+
+  document.querySelectorAll('.page.in').forEach((p) => {
+    p.classList.remove('in');
+  });
+
   state.page = 'chat';
 }
 function openGroup(id, from){
@@ -4724,9 +4913,12 @@ $('entryNew').addEventListener('click', ()=>{
   renderChat('s1');
   toast('新建任务（等同原来的新建对话）');
 });
-$('gearBtn').addEventListener('click', ()=>{
-  toast('打开设置');
-});
+/* [R41-齿轮双绑] 这里原本有一句
+ *     $('gearBtn').addEventListener('click', ()=>{ toast('打开设置'); });
+ * 而 6139 行附近又用「克隆节点换监听」把它换成了真正进设置的逻辑。
+ * 两处都跑了，克隆那一步把这条 toast 监听摘掉 —— 也就是说这行从来
+ * 没生效过，但它的存在让人以为齿轮「只弹提示」。删掉，避免下一个人
+ * 照着它去改而改错地方。真正的事件绑定见 enterSettings 那段上面的注释。 */
 
 /* 底层对话界面：左上角按钮和左边缘手势都能拉出抽屉 */
 $('navBack').addEventListener('click', openDrawer);
@@ -6134,15 +6326,42 @@ function checkUpdate(){
   }
 }
 
-/* 齿轮：抽屉右下角。点它进设置页 —— 页面本体是原版原样，
-   这里只是把入口从左上角挪到了右下角。 */
-const oldGear = $('gearBtn');
-if (oldGear) {
-  const clone = oldGear.cloneNode(true);
-  oldGear.parentNode.replaceChild(clone, oldGear);
-  clone.addEventListener('click', () => {
-    closeDrawer();
-    enterSettings();
+/* 齿轮：抽屉右下角。点它进设置页。
+ *
+ * [R41] 两个改动：
+ *
+ * ① 修叠层。原来是
+ *        closeDrawer();      // 只是改 class，动画要 340ms
+ *        enterSettings();    // 立刻给 .page 加 .in
+ *    抽屉还没滑走，设置页已经在它下面亮起来了，于是「设置显示在抽屉里」。
+ *    现在等 closeDrawer() 的 Promise（动画真结束）再切页。
+ *
+ * ② 不用克隆节点了。克隆在当年是为了「换掉那个只弹 toast 的监听」，
+ *    但克隆有个坑：任何在克隆之前抓到的旧引用都会指向已经从文档里
+ *    摘掉的死节点。这里只有一个监听、而且上面那句 toast 已经删了，
+ *    直接绑就行 —— 简单、没有第二份 DOM。
+ *
+ * 另外加一个 inFlight 挡重复点击：动画那 340ms 里连点两下，
+ * 会进两次 enterSettings，第二次的 openPage 会给已经 .in 的页面
+ * 再加一次动画，视觉上闪一下。 */
+let gearBusy = false;
+const gearBtnEl = $('gearBtn');
+if (gearBtnEl) {
+  gearBtnEl.addEventListener('click', async () => {
+    if (gearBusy) return;
+    gearBusy = true;
+    try {
+      // 抽屉本来就关着（比如从别处触发）时不能白等 340ms
+      if (state.drawerOpen) {
+        await closeDrawer();
+      } else {
+        closeDrawer();
+      }
+      enterSettings();
+    } finally {
+      // 再等一帧，让 .page 的过渡真正进入动画，避免连点穿透
+      setTimeout(() => { gearBusy = false; }, 120);
+    }
   });
 }
 
