@@ -178,11 +178,15 @@ final class GitHubPush {
 
     /// 还差什么，给界面一句话
     var readinessHint: String {
-        if !GitHubAuth.shared.isConfigured { return "App 没配 Client ID，登录做不了" }
+        // [R40-密令登录] 这里原来第一句是「App 没配 Client ID，登录做不了」。
+        // 现在密令登录不需要 Client ID，那句话已经不成立 —— 留着会在
+        // 用户明明能登进去的情况下报一个假失败。只按真状态说。
         if !GitHubAuth.shared.hasToken { return "还没登录 GitHub" }
         if let a = GitHubAuth.shared.account, !a.missingScopes.isEmpty {
             return "令牌缺 \(a.missingScopes.joined(separator: "、")) 权限"
         }
+        // 权限读不到（细粒度令牌）时不拦路 —— 能不能推，让第一次推送的
+        // 403 来说，比在这里预言一个未知结论诚实。
         if repo.isEmpty { return "还没填目标仓库（用户名/仓库名）" }
         if repo.split(separator: "/").count != 2 { return "仓库要写成 用户名/仓库名" }
         if GitHubAuth.shared.account == nil { return "账号信息没拉到，下拉刷新一次" }

@@ -32,6 +32,11 @@ struct GitHubAccountView: View {
     @State private var showSignOutConfirm = false
     @Environment(\.openURL) private var openURL
 
+    // [R40-密令登录] 密令输入面板
+    @State private var showSecretSheet = false
+    @State private var secretDraft = ""
+    @State private var secretError = ""
+
     var body: some View {
         Form {
             masterSwitchSection
@@ -46,11 +51,96 @@ struct GitHubAccountView: View {
         .navigationTitle("GitHub 账号")
         .navigationBarTitleDisplayMode(.inline)
         .onAppear { store.reloadFromDisk() }
+        .sheet(isPresented: $showSecretSheet) {
+            secretSheet
+        }
         .alert("退出 GitHub 账号？", isPresented: $showSignOutConfirm) {
             Button("取消", role: .cancel) {}
             Button("退出", role: .destructive) { store.signOut() }
         } message: {
             Text("只会清掉这台手机上保存的令牌。GitHub 那边的授权还在，要在网页上撤销请去 Settings → Applications。")
+        }
+    }
+
+    // MARK: - [R40-密令登录] 输入面板
+    //
+    // 三步说清用户要做什么：去哪建、建哪个、粘哪儿。
+    // 不写「请粘贴您的 Personal Access Token」这种话 —— 用户不知道
+    // 那是什么。直接给「密令」+ 一个能点的入口。
+
+    private var secretSheet: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    // 不设 secure 输入：令牌需要能看见才能核对有没有粘全，
+                    // 而且它马上就会变成「••••」的已登录状态。
+                    TextField("ghp_… 或 github_pat_…", text: $secretDraft, axis: .vertical)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .font(.system(.footnote, design: .monospaced))
+                        .lineLimit(2...4)
+                        .onChange(of: secretDraft) { _ in secretError = "" }
+                } header: {
+                    Text("密令")
+                } footer: {
+                    if secretError.isEmpty {
+                        Text("粘进来就行。首尾的空格、换行、`Bearer ` 前缀都会自动去掉。")
+                    } else {
+                        Text(secretError)
+                            .foregroundColor(.red)
+                    }
+                }
+
+                Section {
+                    Button {
+                        if let u = URL(string: buildTokenURL) { openURL(u) }
+                    } label: {
+                        Label("去 GitHub 建一个", systemImage: "safari")
+                    }
+                } footer: {
+                    // 权限勾选是最容易出错的一步，单独讲。
+                    // 经典令牌要 repo + workflow；少了 workflow 会 403。
+                    Text("建的时候勾上 **repo** 和 **workflow** 两项。少了 workflow，推送能成功但编译触发不了。有效期限随便选，过期了回来重新登一次。")
+                }
+            }
+            .navigationTitle("用密令登录")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") { showSecretSheet = false }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    if store.secretSigningIn {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Button("登录") { submitSecret() }
+                            .disabled(secretDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    }
+                }
+            }
+        }
+    }
+
+    /// 建令牌的深链。
+    ///
+    /// 带上 scopes 参数，GitHub 会把对应权限预先勾好 ——
+    /// 用户少一次「该勾哪几个」的判断，也就少一次因为漏勾而 403。
+    private var buildTokenURL: String {
+        "https://github.com/settings/tokens/new?scopes=repo,workflow&description=Minis"
+    }
+
+    private func submitSecret() {
+        let s = secretDraft
+        Task {
+            let err = await store.signIn(withSecret: s)
+            if let err {
+                secretError = err
+            } else {
+                // 成功：清掉明文，关面板
+                secretDraft = ""
+                secretError = ""
+                showSecretSheet = false
+            }
         }
     }
 
@@ -86,24 +176,37 @@ struct GitHubAccountView: View {
     }
 
     // MARK: - 一、账号
+    //
+    // [R40-密令登录] 这里原来是「只有设备码登录一条路」。
+    //
+    // 那条路要求 App 里有 OAuth App 的 Client ID，而 `GitHubAuth.clientID`
+    // 一直是空串 —— 于是这个页面永远停在「还没有配置 Client ID」，
+    // 一个能用的入口都没有。用户要的是「能登进去」，
+    // 所以主路改成密令（粘令牌），设备码那条件保留但如实标明不可用。
+    //
+    // 两条路的差别必须写清楚，否则用户会以为密令是自己多此一举：
+    //   密令   —— 现在就能用，要在 GitHub 网页上建一个令牌；
+    //   设备码 —— 体验更好（浏览器点一下），但需要 Client ID。
 
     @ViewBuilder
     private var accountSection: some View {
         Section {
-            if !store.configured {
-                // 配置缺失和用户操作错必须区分开
-                configMissingRow
-            } else if let dc = store.deviceCode {
+            if let dc = store.deviceCode {
+                // 设备码流程已经在跑，优先把它显示完 ——
+                // 这时再显示密令输入框会把用户正在做的事打断。
                 deviceCodeBlock(dc)
             } else if store.signedIn, let acct = store.account {
                 signedInRow(acct)
-            } else if store.polling {
-                HStack(spacing: 10) {
-                    ProgressView().scaleEffect(0.8)
-                    Text("正在向 GitHub 请求验证码…").foregroundColor(.secondary)
-                }
             } else {
-                signInButton
+                secretSignInRow
+                if store.polling {
+                    HStack(spacing: 10) {
+                        ProgressView().scaleEffect(0.8)
+                        Text("正在向 GitHub 请求验证码…").foregroundColor(.secondary)
+                    }
+                } else {
+                    deviceFlowRow
+                }
             }
 
             if !store.loginError.isEmpty {
@@ -114,38 +217,76 @@ struct GitHubAccountView: View {
         } header: {
             Text("账号")
         } footer: {
-            if store.configured && !store.signedIn && store.deviceCode == nil {
-                Text("登录后，App 才能把你的代码推到自己的仓库并触发云端编译。不需要密码，GitHub 会给你一串 8 位码，在浏览器里输一次就行。")
+            if !store.signedIn && store.deviceCode == nil {
+                Text("密令就是 GitHub 的 Personal Access Token，只在登录那一次经过网络，之后以加密形式存在这台手机上。")
             }
         }
     }
 
-    private var configMissingRow: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Label("还没有配置 Client ID", systemImage: "exclamationmark.triangle.fill")
-                .font(.subheadline.weight(.medium))
-                .foregroundColor(.orange)
-            Text("这是 App 的配置项，不是你的操作问题。要在 GitHub 上注册一个 OAuth App 并开启 Device Flow，把 Client ID 填到 `GitHubAuth.clientID`。")
-                .font(.caption)
-                .foregroundColor(.secondary)
-        }
-        .padding(.vertical, 2)
-    }
-
-    private var signInButton: some View {
+    /// 主路：粘贴密令登录。
+    ///
+    /// 为什么用 sheet 而不是在这一行里放个 TextField：
+    /// 令牌是一长串字符，行内输入框在 Form 里只有一行的宽度，
+    /// 粘完看不见全貌、也没法核对；而且粘贴动作本身需要一个
+    /// 「粘贴并登录」的确认步骤，行内输入框没有这个边界。
+    private var secretSignInRow: some View {
         Button {
-            store.startSignIn()
+            secretDraft = ""
+            secretError = ""
+            showSecretSheet = true
         } label: {
             HStack {
-                Image(systemName: "chevron.left.forwardslash.chevron.right")
-                Text("登录 GitHub")
+                Image(systemName: "key.horizontal.fill")
+                    .foregroundColor(.orange)
+                Text("用密令登录")
                 Spacer()
-                Image(systemName: "arrow.up.forward.app")
-                    .font(.caption)
+                Image(systemName: "chevron.right")
+                    .font(.caption2)
                     .foregroundColor(.secondary)
             }
         }
     }
+
+    /// 备路：设备码登录。Client ID 没配时如实置灰。
+    private var deviceFlowRow: some View {
+        Group {
+            if store.configured {
+                Button {
+                    store.startSignIn()
+                } label: {
+                    HStack {
+                        Image(systemName: "chevron.left.forwardslash.chevron.right")
+                        Text("用设备码登录")
+                        Spacer()
+                        Image(systemName: "arrow.up.forward.app")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+            } else {
+                // 不隐藏，而是显示成不可用 + 一句原因。
+                // 藏起来的话，用户从别处听说「这 App 能用设备码登录」时
+                // 会找不到入口、以为坏了。
+                HStack {
+                    Image(systemName: "chevron.left.forwardslash.chevron.right")
+                        .foregroundColor(.secondary)
+                    Text("用设备码登录")
+                        .foregroundColor(.secondary)
+                    Spacer()
+                    Text("需要 Client ID")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+            }
+        }
+    }
+
+    // [R40-密令登录] 原来这里有 `configMissingRow`（「还没有配置 Client ID」
+    // 那一整块警告）和 `signInButton`（唯一的登录按钮）。
+    // 改成密令为主路后，两者都没有引用点了：
+    //   · Client ID 缺失不再是「整页报错」，而是设备码那一行的一枚灰字；
+    //   · 登录按钮被 `secretSignInRow` 取代。
+    // 按「不留死代码」的规矩一起删掉，别给下一个人留两个没人调用的属性。
 
     /// 显示 8 位码。这是整个登录流程里唯一需要用户动手的一步。
     private func deviceCodeBlock(_ dc: GitHubDeviceCode) -> some View {
@@ -269,8 +410,13 @@ struct GitHubAccountView: View {
         } header: {
             Text("权限")
         } footer: {
-            if let missing = store.account?.missingScopes, !missing.isEmpty {
-                Text("缺 \(missing.joined(separator: "、"))。少了这两项，推代码或触发编译会被 GitHub 拒绝。退出后重新登录，授权页会把缺的勾上。")
+            // [R40-密令登录] 权限读不到时不能显示成「缺 repo、workflow」。
+            // 细粒度令牌本来就不在响应头里回 scopes，照旧文案会让人
+            // 以为自己建错了令牌、跑去重建一个 —— 那是最浪费时间的误导。
+            if store.account?.scopeUnknown == true {
+                Text("这枚密令读不到权限范围（细粒度令牌就是这样）。能推不能推，等第一次推送时 GitHub 的回答为准 —— 被拒的话它会明确说缺哪一项。")
+            } else if let missing = store.account?.missingScopes, !missing.isEmpty {
+                Text("缺 \(missing.joined(separator: "、"))。少了这两项，推代码或触发编译会被 GitHub 拒绝。")
                     .foregroundColor(.orange)
             } else {
                 Text("这两项是云端编译必须的。其它权限（删仓库、管理组织）故意没有申请。")
@@ -279,9 +425,13 @@ struct GitHubAccountView: View {
     }
 
     private func scopeRow(_ title: String, scope: String, ok: Bool) -> some View {
-        HStack {
-            Image(systemName: ok ? "checkmark.circle.fill" : "circle.dashed")
-                .foregroundColor(ok ? .green : .orange)
+        // 权限未知 → 画成「问号」，不是「没勾」。
+        // 三态而不是两态：勾了 / 没勾 / 不知道，本来就是三件事。
+        let unknown = store.account?.scopeUnknown == true
+        return HStack {
+            Image(systemName: unknown ? "questionmark.circle.fill"
+                                      : (ok ? "checkmark.circle.fill" : "circle.dashed"))
+                .foregroundColor(unknown ? .secondary : (ok ? .green : .orange))
             Text(title)
             Spacer()
             Text(scope)

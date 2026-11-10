@@ -129,8 +129,11 @@ final class GitHubStore: ObservableObject {
 
     /// 界面顶部那句状态
     var statusLine: String {
-        if !configured { return "App 没配 GitHub Client ID" }
-        if !signedIn { return "未登录" }
+        // [R40-密令登录] 不再把「有没有 Client ID」当成前置条件。
+        // 密令登录不依赖它，所以只在未登录时才提一句这件事。
+        if !signedIn {
+            return configured ? "未登录" : "未登录（可在本页用密令登录）"
+        }
         if let a = account {
             if !a.missingScopes.isEmpty {
                 return "已登录 \(a.login)，但缺 \(a.missingScopes.joined(separator: "、")) 权限"
@@ -199,6 +202,39 @@ final class GitHubStore: ObservableObject {
         polling = false
         deviceCode = nil
         secondsLeft = 0
+    }
+
+    // MARK: - [R40-密令登录] 用现成令牌登录
+
+    /// 密令登录的进行中标记。与 `polling` 分开：
+    /// 一个是「在浏览器里等授权」，一个是「在校验你粘进来的令牌」，
+    /// 界面文案和能不能取消都不一样，混用一个状态只会互相干扰。
+    @Published private(set) var secretSigningIn = false
+
+    /// 用密令登录。成功返回 nil，失败返回要显示给用户的一句话。
+    ///
+    /// 返回 String? 而不是 throw：这个方法的调用方是一个 SwiftUI 按钮，
+    /// 那里本来就要么改 @State 要么什么都不做，让它自己 catch 一个
+    /// LocalizedError 只是多一层壳。错误文案在这里就翻成人话。
+    func signIn(withSecret raw: String) async -> String? {
+        guard !secretSigningIn else { return nil }
+        secretSigningIn = true
+        loginError = ""
+        defer { secretSigningIn = false }
+
+        do {
+            let acct = try await GitHubAuth.shared.signIn(withSecret: raw)
+            account = acct
+            loginError = ""
+            revision += 1
+            reloadFromDisk()
+            return nil
+        } catch {
+            let msg = (error as? GitHubAuthError)?.errorDescription
+                ?? error.localizedDescription
+            loginError = msg
+            return msg
+        }
     }
 
     private func startCountdown(to end: Date) {

@@ -40,6 +40,12 @@ enum GitHubAuthError: LocalizedError {
     case network(String)
     case http(Int)
     case badReply
+    /// [R40-密令登录] 密令输入框是空的 / 只输了空格
+    case emptySecret
+    /// [R40-密令登录] 密令被 GitHub 判为无效（401）
+    case badSecret
+    /// [R40-密令登录] 令牌有效但账号被停用 / 被限流（403）
+    case forbidden(String)
 
     var errorDescription: String? {
         switch self {
@@ -57,6 +63,12 @@ enum GitHubAuthError: LocalizedError {
             return "GitHub 返回 HTTP \(c)。"
         case .badReply:
             return "GitHub 返回了看不懂的内容。"
+        case .emptySecret:
+            return "密令是空的。"
+        case .badSecret:
+            return "这串密令 GitHub 不认。可能复制少了字符、已经过期，或者已经被撤销。"
+        case .forbidden(let m):
+            return m.isEmpty ? "密令有效，但这个账号现在被 GitHub 拒绝了。" : m
         }
     }
 
@@ -65,6 +77,7 @@ enum GitHubAuthError: LocalizedError {
         switch self {
         case .expired, .network, .http: return true
         case .denied, .missingClientID, .storageFailed, .badReply: return false
+        case .emptySecret, .badSecret, .forbidden: return false
         }
     }
 }
@@ -92,10 +105,27 @@ struct GitHubAccount: Codable, Equatable {
     var login: String
     var name: String?
     var avatarURL: String?
-    /// token 实际拿到的权限范围，用空格分隔。用来判断「够不够推代码」
+    /// token 实际拿到的权限范围。用来判断「够不够推代码」
     var scopes: [String]
     /// 登录时间，用于界面显示
     var signedInAt: Date
+
+    /// [R40-密令登录] 权限范围读不到。
+    ///
+    /// 两条登录路线读 scopes 的方式不一样：
+    ///   · 设备码登录 —— `access_token` 响应里直接给 `scope` 字段，一定有值；
+    ///   · 密令登录   —— 只能读响应头 `X-OAuth-Scopes`。
+    ///     **细粒度令牌（`github_pat_` 开头）这个头是空的**，
+    ///     经典令牌（`ghp_` 开头）才有。
+    ///
+    /// 这种时候不能当成「一个权限都没有」——那会把用户的开关锁死在灰的，
+    /// 明明令牌是好的却什么都干不了。所以单独标出来，判定时放行，
+    /// 真没权限的话第一次推送会拿到 403，界面那时再说话。
+    ///
+    /// 用 optional 而不是带默认值的 Bool：`Codable` 合成出来的
+    /// `init(from:)` 对带默认值的非 optional 属性仍然要求 key 存在，
+    /// 老的存档（这个字段还不存在时写的）会直接解码失败、账号丢失。
+    var scopeUnknown: Bool?
 
     var displayName: String {
         if let n = name?.trimmingCharacters(in: .whitespacesAndNewlines), !n.isEmpty {
@@ -104,13 +134,16 @@ struct GitHubAccount: Codable, Equatable {
         return login
     }
 
+    /// 权限读不到 = 不知道，不是「没有」。
+    private var unknown: Bool { scopeUnknown == true }
+
     /// 能不能往仓库写文件 / 触发 Actions。
     ///
     /// 推代码要 `repo`，触发 workflow_dispatch 要 `workflow`。
     /// 两者缺一，后面那条「本机编不出来推 GitHub」就跑不通 ——
     /// 所以在设置页要明确显示缺哪个，而不是等到用户点了编译才报错。
-    var canPushCode: Bool { scopes.contains("repo") }
-    var canTriggerWorkflow: Bool { scopes.contains("workflow") }
+    var canPushCode: Bool { unknown || scopes.contains("repo") }
+    var canTriggerWorkflow: Bool { unknown || scopes.contains("workflow") }
 
     var missingScopes: [String] {
         var m: [String] = []
@@ -294,6 +327,138 @@ final class GitHubAuth {
         }
 
         throw GitHubAuthError.expired
+    }
+
+    // MARK: - [R40-密令登录] 直接拿令牌登录
+
+    /// 用一串已经存在的 GitHub 令牌登录，不走 Device Flow。
+    ///
+    /// ============================================================
+    /// 为什么需要这条路
+    ///
+    /// 设备码登录要求 App 里有一个 OAuth App 的 Client ID。
+    /// 这个改造版没有（也拿不到一个不会被滥用的），所以那条路在
+    /// 当前包里永远是「未配置」。密令登录不依赖 Client ID：
+    /// 用户在 GitHub 网页上自己建一个令牌，粘进来就行。
+    ///
+    /// 三种令牌都收
+    /// ----------------------------------------------------------
+    ///   ghp_  —— 经典令牌，最省事，scopes 由创建时勾选决定
+    ///   github_pat_ —— 细粒度令牌，能精确到单个仓库，更安全，
+    ///                  但响应头里不返回 scopes（见 scopeUnknown）
+    ///   gho_ / ghu_ / ghs_ —— OAuth 与 App 令牌，用户可能从别处拿到
+    ///
+    /// 校验方式
+    /// ----------------------------------------------------------
+    /// 拿令牌打一次 `GET /user`：
+    ///   · 200 → 有效。顺带把 login / 昵称 / 头像取回来，不用再请求一次。
+    ///   · 401 → 令牌错了或已撤销。
+    ///   · 403 → 令牌本身没问题，但账号被限 / 被停用，如实说。
+    /// 只有 200 才落盘，避免存一个必然失败的令牌进去。
+    ///
+    /// 注意 `GET /user` 对**任何**有效令牌都返回 200，
+    /// 包括权限极小的令牌 —— 所以这一步只证明「令牌是真的」，
+    /// 不证明「够权限推代码」。够不够由 403 在真正推送时说话，
+    /// 这里不假装能提前判死。
+    /// ============================================================
+    func signIn(withSecret raw: String) async throws -> GitHubAccount {
+        // 粘贴常常带上首尾空格、换行、甚至 `Bearer ` 前缀
+        var t = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if t.lowercased().hasPrefix("bearer ") {
+            t = String(t.dropFirst("bearer ".count))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        // 用户有时会把整段 `Token: ghp_xxx` 一起粘进来
+        if let r = t.range(of: "ghp_", options: .caseInsensitive), r.lowerBound != t.startIndex {
+            t = String(t[r.lowerBound...])
+        } else if let r = t.range(of: "github_pat_", options: .caseInsensitive),
+                  r.lowerBound != t.startIndex {
+            t = String(t[r.lowerBound...])
+        }
+        guard !t.isEmpty else { throw GitHubAuthError.emptySecret }
+
+        var req = URLRequest(url: URL(string: "https://api.github.com/user")!)
+        req.httpMethod = "GET"
+        req.setValue("Bearer \(t)", forHTTPHeaderField: "Authorization")
+        req.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        req.setValue("2022-11-28", forHTTPHeaderField: "X-GitHub-Api-Version")
+        // GitHub 要求带 UA
+        req.setValue("Minis-GitHubAuth", forHTTPHeaderField: "User-Agent")
+        req.timeoutInterval = 20
+
+        let (data, resp) = try await send(req)
+        let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+
+        switch code {
+        case 200:
+            break
+        case 401:
+            throw GitHubAuthError.badSecret
+        case 403:
+            // 可能是限流，也可能是账号被限制。把 GitHub 的说法带出去，
+            // 别自己编一句「令牌无效」——那是错的且会误导用户去重建令牌。
+            let msg = Self.apiMessage(from: data)
+            throw GitHubAuthError.forbidden(msg)
+        default:
+            throw GitHubAuthError.http(code)
+        }
+
+        // ── 解析账号画像 ──
+        guard let doc = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let login = doc["login"] as? String, !login.isEmpty
+        else { throw GitHubAuthError.badReply }
+
+        let name = doc["name"] as? String
+        let avatar = doc["avatar_url"] as? String
+
+        // ── 解析权限 ──
+        //
+        // 经典令牌会在响应头里回 `X-OAuth-Scopes: repo, workflow, read:user`。
+        // 细粒度令牌不带这个头 —— 那就标记为「未知」，见 GitHubAccount.scopeUnknown。
+        var scopes: [String] = []
+        var unknown = false
+        if let http = resp as? HTTPURLResponse {
+            if let raw = http.value(forHTTPHeaderField: "X-OAuth-Scopes") {
+                scopes = raw.split(separator: ",")
+                    .map { $0.trimmingCharacters(in: .whitespaces) }
+                    .filter { !$0.isEmpty }
+            } else if !t.hasPrefix("ghp_") {
+                // 不是经典令牌、又没有 scopes 头 → 细粒度或 App 令牌，读不到
+                unknown = true
+            }
+            // 经典令牌却没有这个头（理论上不会）→ 也当作读不到，别误判成零权限
+            if t.hasPrefix("ghp_") && scopes.isEmpty {
+                unknown = true
+            }
+        } else {
+            unknown = true
+        }
+
+        // ── 落盘 ──
+        // 走到这里令牌已被 GitHub 确认有效，才允许加密保存。
+        guard saveToken(t) else { throw GitHubAuthError.storageFailed }
+
+        let acct = GitHubAccount(
+            login: login,
+            name: name,
+            avatarURL: avatar,
+            scopes: scopes,
+            signedInAt: Date(),
+            scopeUnknown: unknown
+        )
+        if let enc = try? JSONEncoder().encode(acct) {
+            UserDefaults.standard.set(enc, forKey: kAccount)
+        }
+        return acct
+    }
+
+    /// 从 GitHub 的错误体里抠出 `message`。
+    /// 拿不到就给空串 —— 调用方会用兜底文案，不会显示一个空提示。
+    private static func apiMessage(from data: Data) -> String {
+        guard let doc = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let m = doc["message"] as? String
+        else { return "" }
+        return m.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     // MARK: - 账号画像

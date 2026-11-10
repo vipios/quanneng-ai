@@ -2176,6 +2176,36 @@
   .dw-gear{
     bottom:max(24px, calc(env(safe-area-inset-bottom, 0px) + 8px)) !important;
   }
+
+  /* ============================================================
+     [禁止文本选择] —— 修「点文字不进下一级、点文字后面空白才进」
+     ------------------------------------------------------------
+     这套模板在桌面浏览器里是给鼠标用的，文字默认可选中。搬进
+     WKWebView 之后就出事：手指按在文字上，WebKit 先把它当成
+     「可能要选中/长按这段文本」来处理，那个交互会吃掉这一次
+     click —— 于是点「中转站后台」这四个字没反应，点同一行
+    右边的空白（那里没有文本节点）反而正常进页。
+
+     这是纯 CSS 能修的：整页关掉选择与长按菜单，输入框再还原。
+     不影响长按改名（那是自己用 timer 实现的，不走原生文本交互）。
+     ============================================================ */
+  *{
+    -webkit-user-select:none !important;
+    -webkit-touch-callout:none !important;
+    user-select:none !important;
+    -webkit-tap-highlight-color:transparent !important;
+  }
+  /* 输入框必须还能选中/编辑，否则连地址都改不了。 */
+  input, textarea, [contenteditable="true"]{
+    -webkit-user-select:text !important;
+    user-select:text !important;
+  }
+  /* 可点的行/按钮统一给出指针语义，顺便关掉双击缩放。 */
+  .row, .dw-chat, .dw-entry, .dw-gear, .tbtn, .backbtn,
+  .chip, .mode-card, .rt-chip, button, .arrow{
+    cursor:pointer;
+    touch-action:manipulation;
+  }
 </style>
 </head>
 <body>
