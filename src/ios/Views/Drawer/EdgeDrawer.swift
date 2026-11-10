@@ -191,6 +191,21 @@ struct DrawerContainer<Drawer: View, Content: View>: View {
                             template.closeDrawer()
                         }
                     }
+                    // 反向同步：模板自己也会关抽屉。
+                    //
+                    // 典型场景就是点齿轮 —— 模板的 handler 是
+                    // `closeDrawer(); enterSettings();`，它把 DOM 收起来了，
+                    // 但原生这边的 `progress` 还停在 1，于是那层跟着进度走的
+                    // 黑色遮罩会一直盖在设置页上面，整屏发暗。
+                    //
+                    // 只在「模板说关了、原生还开着」时补一刀，反过来不处理：
+                    // 原生开着而模板没开，说明手势正在拉，这时候去关会把
+                    // 跟手动画打断。
+                    .onChange(of: template.drawerOpen) { open in
+                        if !open, state.progress > 0.02, !template.pageOpen {
+                            state.close()
+                        }
+                    }
                     // 抽屉态右侧那条热区：模板的 WebView 是全屏的，
                     // 不补这一层，点抽屉右边空白什么都不会发生 ——
                     // 而这是用户关抽屉最常用的手势。
