@@ -434,38 +434,14 @@ struct AIChatView: View {
     @Environment(\.scenePhase) private var scenePhase
 
     // MARK: - [R43-左上角] 抽屉入口
-
-    /// 可选的抽屉状态。没有抽屉的路径（iPad 分栏、深链直达）是 nil。
-    ///
-    /// 用可选 Key 而不是 `@EnvironmentObject`：后者缺失时会直接崩，
-    /// 而「没有抽屉」在 App 里是合法状态。见 `DrawerStateOptionalKey`。
+    //
+    // 抽屉状态走「可选 Environment」读取（见 DrawerStateOptionalKey），
+    // 返回键判据用 hSizeClass —— 这两处原先是「返回闭包的计算属性」，
+    // 但 AIChatView 这个 struct 已经顶到 Swift 类型检查器（singlefile
+    // 模式）的单文件预算上限，再多两个闭包返回属性就把弦拉断了，
+    // 编译器随机在某行报「type-check in reasonable time」。
+    // 所以这里改成直接读，把闭包构造下沉到 body 调用点，减轻推断负担。
     @Environment(\.drawerStateOrNil) private var drawerStateOrNil
-
-    /// 左上角「三横」：展开抽屉。nil = 这条路径没有抽屉，不画按钮。
-    var drawerOpenAction: (() -> Void)? {
-        guard let drawerStateOrNil else { return nil }
-        return { drawerStateOrNil.open() }
-    }
-
-    /// 左上角「书本」：**替换系统返回箭头**，点了照样回上一级。
-    ///
-    /// 只在 iPhone 导航栈里有意义 —— iPad 是分栏，没有「上一级」可回，
-    /// 那里返回 nil，系统箭头原样保留（也就不会隐藏它）。
-    ///
-    /// 判据用 `hSizeClass == .compact`，和 `stackLayout` 的选路保持一致：
-    /// 宽屏走 `splitLayout`，压根没有导航栈。
-    var drawerBackAction: (() -> Void)? {
-        guard hSizeClass == .compact else { return nil }
-        return {
-            // `dismiss` 在 NavigationStack 里就是 pop，和系统返回键同一条
-            // 路径 —— 转场动画、`onDisappear` 里那套会话挂起、栈顶 id 同步
-            // 全由 NavigationStack 负责。
-            //
-            // 不要自己改 `navigationPath`：那会绕过 `.id(id)` 的重建逻辑，
-            // 表现是「返回后再进来，对话内容还是旧的」。
-            dismiss()
-        }
-    }
 
     // MARK: - [T-ipad-composer-resize] Draggable composer height (iPad only)
 
@@ -564,6 +540,11 @@ struct AIChatView: View {
     @State var missingMinisFileName: String?
 
     var body: some View {
+        // [R44-编译超时] 抽屉/返回的两个闭包提前落成局部量，避免在
+        // ChatToolbarHost 调用点做嵌套闭包推断（map { { open() } } 和
+        // 三元 ? { dismiss() } : nil 是 Swift 类型检查的经典超时形态）。
+        let openDrawerClosure: (() -> Void)? = drawerStateOrNil.map { state in { state.open() } }
+        let backClosure: (() -> Void)? = hSizeClass == .compact ? { dismiss() } : nil
         // [T-ios-chat-body-stack-erase] Type-erase the page's content before
         // the ~80-modifier chain below. Most of those modifiers (.sheet,
         // .onChange, .onReceive, .alert, ...) return an opaque `some View`
@@ -839,8 +820,8 @@ struct AIChatView: View {
         .background(
             ChatToolbarHost(key: chatToolbarKey,
                             showsTrailing: !ChatNavMenuBarItem.isEnabled,
-                            onOpenDrawer: drawerOpenAction,
-                            onBack: drawerBackAction,
+                            onOpenDrawer: openDrawerClosure,
+                            onBack: backClosure,
                             title: {
                 chatNavPrincipalContent
             }, trailing: {
@@ -858,9 +839,9 @@ struct AIChatView: View {
         // `.background` 上，再叠一层 background 有两层背景互相影响尺寸的
         // 隐患。overlay 挂一个零尺寸、不吃触摸的探针，位置无关紧要 ——
         // 它只负责抓一下导航控制器。
-        .navigationBarBackButtonHidden(drawerBackAction != nil)
+        .navigationBarBackButtonHidden(hSizeClass == .compact)
         .overlay {
-            if drawerBackAction != nil {
+            if hSizeClass == .compact {
                 SwipeBackEnabler()
                     .frame(width: 0, height: 0)
                     .allowsHitTesting(false)
@@ -1449,63 +1430,7 @@ struct AIChatView: View {
             pageLeaveLatch.markAppeared()
         }))
         .onDisappear {
-            isChatViewVisible = false
-            CrashBreadcrumbs.record("page.hide",
-                                    detail: "chat:" + CrashBreadcrumbs.hash8(vm.sessionId ?? vm.draftId ?? "draft"))
-            AlwaysOnController.shared.chatDisappeared(key: vm.sessionId ?? vm.draftId)
-            // [T-voice-inputbar-collapse-selfheal] The health probe must not
-            // outlive the view — its report would describe a composer that no
-            // longer exists.
-            inputBarHealthProbe?.cancel()
-            inputBarHealthProbe = nil
-            // [T-voice-send-lock] A send still waiting for recognition does
-            // not go out behind the user's back once they have left the page;
-            // the transcript stays, and they send it when they return.
-            voiceVM.abandonFinishForSend(.chatLeft)
-            if speechManager.state == .recording {
-                speechManager.stopRecording()
-            }
-            // [T-inputbar-keyboard-leaks-to-home] Cut the ONLY channel by which
-            // chat composer geometry can reach the HOME screen.
-            //
-            // `inputBarHeight` is per-view @State and only feeds the message
-            // list's bottom inset — it cannot touch home. What CAN is a stranded
-            // first responder: leaving the chat while the composer (or the voice
-            // transcript editor) still holds focus leaves the keyboard's inset
-            // reserved on the WINDOW, and SwiftUI's automatic keyboard avoidance
-            // applies that window-wide. The home screen's New/Search FAB row is a
-            // `.safeAreaInset(edge: .bottom)` (ContentView 1213/1326) with no
-            // `.ignoresSafeArea(.keyboard)` opt-out, so it reads that inflated
-            // bottom safe area and floats upward — the reported symptom. Same
-            // failure class as the offscreen-WebView phantom keyboard (8232308a)
-            // and the voice-editor stranded responder (4c530bf4); this closes the
-            // remaining door, the chat→home transition itself.
-            //
-            // Blanket-disabling keyboard avoidance on the home FAB row would be
-            // the wrong fix — its inline search field legitimately needs to rise
-            // with the keyboard. Releasing the responder at the source is correct
-            // and is a no-op when nothing is focused.
-            inputFocused = false
-            let keyWindow = UIApplication.shared.connectedScenes
-                .compactMap { $0 as? UIWindowScene }
-                .flatMap(\.windows)
-                .first(where: \.isKeyWindow)
-            if let keyWindow, keyWindow.endEditing(true) {
-                AppLogger(category: "InputBarLayout").info("chat onDisappear — released a lingering first responder (would have left a phantom keyboard inset on the window)")
-            }
-            // [OpenMinis#433] A new chat left with unsent text keeps it, like
-            // an existing session does: the next new chat for the same group
-            // resumes this VM. No-op once the chat has a session id. Runs after
-            // the voice cleanup above so a transcript kept there counts.
-            ViewModelCache.shared.parkNewChatIfUnsent(vm, groupId: initialGroupId)
-            // Capsule auto-shows whenever audio is loaded — no manual activation needed.
-            // [R44-编译超时] 5 段插值 + 3 个 ?? 拆成局部量再拼，降低类型检查负担。
-            let vmId = vm.vmInstanceId
-            let sidText = sessionId ?? "nil"
-            let draftText = draftId ?? "nil"
-            let vmSidText = vm.sessionId ?? "nil"
-            let processing = vm.isProcessing
-            minisLogger.info("🔑DRAFT AIChatView.onDisappear vm=\(vmId) sessionId=\(sidText) draftId=\(draftText) vm.sessionId=\(vmSidText) vm.isProcessing=\(processing)")
+            handleDisappear()
         }
         // [T-voice-bg-fg-gap] Structural immunity: while the voice panel is up
         // and the transcript editor is NOT open, there is no legitimate keyboard
@@ -1961,5 +1886,34 @@ struct AIChatView: View {
         // (sessionId=nil) won't match the workflow's target and
         // are correctly skipped.
         tryMarkWorkflowChatReady(reason: "onAppear")
+    }
+
+    /// [R44-编译超时] 原 onDisappear 闭包 59 行，抽成方法给类型检查减负。
+    private func handleDisappear() {
+        isChatViewVisible = false
+        CrashBreadcrumbs.record("page.hide",
+                                detail: "chat:" + CrashBreadcrumbs.hash8(vm.sessionId ?? vm.draftId ?? "draft"))
+        AlwaysOnController.shared.chatDisappeared(key: vm.sessionId ?? vm.draftId)
+        inputBarHealthProbe?.cancel()
+        inputBarHealthProbe = nil
+        voiceVM.abandonFinishForSend(.chatLeft)
+        if speechManager.state == .recording {
+            speechManager.stopRecording()
+        }
+        inputFocused = false
+        let keyWindow = UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .flatMap(\.windows)
+            .first(where: \.isKeyWindow)
+        if let keyWindow, keyWindow.endEditing(true) {
+            AppLogger(category: "InputBarLayout").info("chat onDisappear — released a lingering first responder (would have left a phantom keyboard inset on the window)")
+        }
+        ViewModelCache.shared.parkNewChatIfUnsent(vm, groupId: initialGroupId)
+        let vmId = vm.vmInstanceId
+        let sidText = sessionId ?? "nil"
+        let draftText = draftId ?? "nil"
+        let vmSidText = vm.sessionId ?? "nil"
+        let processing = vm.isProcessing
+        minisLogger.info("🔑DRAFT AIChatView.onDisappear vm=\(vmId) sessionId=\(sidText) draftId=\(draftText) vm.sessionId=\(vmSidText) vm.isProcessing=\(processing)")
     }
 }
