@@ -327,8 +327,12 @@ func literals(_ src: String, from start: String, to end: String) -> [String] {
 }
 
 print("\n▶️  6. the two platforms agree")
+// 本仓已移除 src/android（只做 iOS 线，见仓库根 README）。
+// Android 源码不在时 Part 3 的交叉验证无从比 —— 跳过并说明。
+// 刻意不写成 check("Android sources readable", false)：那会让本仓每次跑
+// 测试都飘一条红，真有问题的断言反而被这条噪音盖住。
 if droidModality.isEmpty || droidTest.isEmpty {
-    check("Android sources readable", false)
+    print("⏭  skipping Part 3: src/android 不存在（本仓只保 iOS 线）")
 } else {
     check("role values identical",
           droidModality.contains(#"const val TTS = "tts""#) && droidModality.contains(#"const val STT = "stt""#)

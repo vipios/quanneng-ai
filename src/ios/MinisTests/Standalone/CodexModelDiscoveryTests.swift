@@ -399,14 +399,20 @@ if api.isEmpty {
     check("the ported visibility/reasoning helpers are byte-identical with the shipping source",
           !helper(api).isEmpty && helper(api) == helper(me))
     // iOS / Android must hide the same entries.
+    // 本仓已移除 src/android（只做 iOS 线）：源码不在时这条交叉验证跳过，
+    // 不写成 check(false) —— 那会常年飘红，盖住真正的问题。
     let androidApi = source("../android/app/src/main/java/com/openminis/app/provider/openai/CodexModelsApi.kt")
-    let androidSet = androidApi.range(of: "HIDDEN_VISIBILITIES = setOf(").map { r -> Set<String> in
-        let tail = androidApi[r.upperBound...]
-        let body = tail[..<(tail.firstIndex(of: ")") ?? tail.endIndex)]
-        return Set(body.split(separator: ",").map { $0.trimmingCharacters(in: CharacterSet(charactersIn: " \"\n")) })
-    } ?? []
-    check("iOS hidden visibilities == Android HIDDEN_VISIBILITIES (\(androidSet.sorted()))",
-          !androidSet.isEmpty && androidSet == OpenAIModelsAPI.hiddenCodexVisibilities)
+    if androidApi.isEmpty {
+        print("⏭  skipping cross-platform visibility check: src/android 不存在")
+    } else {
+        let androidSet = androidApi.range(of: "HIDDEN_VISIBILITIES = setOf(").map { r -> Set<String> in
+            let tail = androidApi[r.upperBound...]
+            let body = tail[..<(tail.firstIndex(of: ")") ?? tail.endIndex)]
+            return Set(body.split(separator: ",").map { $0.trimmingCharacters(in: CharacterSet(charactersIn: " \"\n")) })
+        } ?? []
+        check("iOS hidden visibilities == Android HIDDEN_VISIBILITIES (\(androidSet.sorted()))",
+              !androidSet.isEmpty && androidSet == OpenAIModelsAPI.hiddenCodexVisibilities)
+    }
     let store = source("Providers/ProviderConfigStore.swift")
     check("an app update with a new client version refreshes once without waiting out the window",
           store.contains("let versionChanged = UserDefaults.standard.string(forKey: versionKey) != OpenAIProvider.codexClientVersion")

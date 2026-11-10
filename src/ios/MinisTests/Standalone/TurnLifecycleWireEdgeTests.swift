@@ -300,13 +300,18 @@ let androidBlock = slice(androidMimicrySrc, from: "val ALL: List<Pair<String, St
 let iosHeaders = pairs(iosBlock, pattern: #""([A-Za-z-]+)":\s*"([^"]*)""#)
 let androidHeaders = pairs(androidBlock, pattern: #""([A-Za-z-]+)"\s+to\s+"([^"]*)""#)
 check("iOS header set parsed (11)", iosHeaders.count == 11)
-check("Android header set parsed (11)", androidHeaders.count == 11)
-check("same header names", Set(iosHeaders.keys) == Set(androidHeaders.keys))
-for k in iosHeaders.keys.sorted() where iosHeaders[k] != androidHeaders[k] {
-    check("\(k): iOS=\(iosHeaders[k] ?? "nil") Android=\(androidHeaders[k] ?? "nil")", false)
+// 本仓已移除 src/android（只做 iOS 线）：Android 侧读不到时跳过这组交叉验证。
+if androidMimicrySrc.isEmpty {
+    print("⏭  skipping Android header cross-check: src/android 不存在")
+} else {
+    check("Android header set parsed (11)", androidHeaders.count == 11)
+    check("same header names", Set(iosHeaders.keys) == Set(androidHeaders.keys))
+    for k in iosHeaders.keys.sorted() where iosHeaders[k] != androidHeaders[k] {
+        check("\(k): iOS=\(iosHeaders[k] ?? "nil") Android=\(androidHeaders[k] ?? "nil")", false)
+    }
+    check("User-Agent identical (model floors are version-gated on it)",
+          iosHeaders["User-Agent"] != nil && iosHeaders["User-Agent"] == androidHeaders["User-Agent"])
 }
-check("User-Agent identical (model floors are version-gated on it)",
-      iosHeaders["User-Agent"] != nil && iosHeaders["User-Agent"] == androidHeaders["User-Agent"])
 
 print("")
 print("⚠️  \(warnings) known gap(s) documented")

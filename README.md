@@ -1,7 +1,12 @@
 # OpenMinis
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
-[![Platforms](https://img.shields.io/badge/Platforms-iOS%20%7C%20Android-lightgrey.svg)](#beta-programme)
+[![Platform](https://img.shields.io/badge/Platform-iOS-lightgrey.svg)](#beta-programme)
+
+> **本仓只保 iOS 线。** 原 OpenMinis 是 iOS + Android 双端；这里已移除
+> `src/android/` 与全部 Android 构建脚本（本仓产出只有 iOS 包，CI 也只构 iOS）。
+> 需要 Android 端请看上游 [OpenMinis/OpenMinis](https://github.com/OpenMinis/OpenMinis)。
+
 
 **Your private, on-device AI agent.**
 
@@ -21,10 +26,6 @@ Official website: **[openminis.app](https://openminis.app)**
 
 <a href="https://apps.apple.com/app/id6759188481">
   <img alt="Download on the App Store" height="48" src="assets/badge-appstore.svg" />
-</a>
-&nbsp;
-<a href="https://github.com/OpenMinis/OpenMinis/releases">
-  <img alt="Get the APK on GitHub" height="48" src="assets/badge-android.svg" />
 </a>
 
 ![Minis on iOS — deep research, chat, agent runtime, integrations, iCloud sync and granular permissions](assets/screenshots.png)
@@ -111,16 +112,13 @@ and new features land first.
 
 **→ [Join the TestFlight beta](https://testflight.apple.com/join/3BdkA5c3)**
 
-On Android, the [releases page](https://github.com/OpenMinis/OpenMinis/releases)
-always carries the latest APK.
-
 ---
 
 ## Building from source
 
-Minis ships a Linux sandbox inside the app, so the native dependencies (iSH on
-iOS, PRoot on Android, FFmpeg, LAME, rclone) and the Alpine rootfs are **built
-from source** rather than committed as binaries.
+Minis ships a Linux sandbox inside the app, so the native dependencies (iSH,
+FFmpeg, LAME, rclone) and the Alpine rootfs are **built from source** rather
+than committed as binaries.
 
 **→ See [BUILDING.md](BUILDING.md) for the full first-build guide.**
 
@@ -137,12 +135,6 @@ cd OpenMinis
 ./deps/build_ish.sh && ./deps/prepare_alpine_rootfs.sh
 ./deps/build_rclone_ios.sh
 open src/ios/Minis.xcodeproj
-
-# Android — needs NDK r28+, Go 1.25+ and gomobile
-./deps/build_proot.sh && ./scripts/prepare_android_sandbox.sh
-./deps/build_rclone_android.sh
-mkdir -p src/android/app/libs && cp deps/build/rclone/rclone.aar src/android/app/libs/
-cd src/android && ./gradlew :app:assembleDebug
 ```
 
 `BUILDING.md` covers the toolchain requirements per platform, the build-time
@@ -155,8 +147,7 @@ you are most likely to hit.
 
 ```
 src/ios/          iOS app (Swift / SwiftUI) + share, widget and file-provider extensions
-src/android/      Android app (Kotlin / Compose) + JNI native code
-src/shared/       Assets shared by both platforms
+src/shared/       Assets shared across targets
 deps/             Native dependency build scripts and vendored sources
 docs/specs/       Architecture and interface specifications
 scripts/          Rootfs preparation and developer tooling
@@ -174,9 +165,6 @@ terms, is in [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
 
 - **[iSH](https://github.com/ish-app/ish)** (GPLv3) — Linux usermode emulation on
   iOS. We run [an ARM64 fork](https://github.com/OpenMinis/ish-arm64).
-- **[PRoot](https://github.com/termux/proot)** (GPLv2) — user-space chroot for the
-  Android sandbox, via [our fork](https://github.com/OpenMinis/proot);
-  **[talloc](https://talloc.samba.org)** (LGPLv3+) underpins it.
 - **[Alpine Linux](https://alpinelinux.org)** — the minirootfs the sandbox boots.
 
 **Media & text** — [FFmpeg](https://ffmpeg.org) (LGPL-2.1+),
@@ -188,13 +176,6 @@ terms, is in [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
 [RealTimeCutVADLibrary](https://github.com/helloooideeeeea/RealTimeCutVADLibrary) (all MIT),
 [swift-cmark](https://github.com/swiftlang/swift-cmark) (BSD-2-Clause), and the
 Apple / Swift Server Workgroup packages (Apache-2.0).
-
-**Android** — [AndroidX & Jetpack Compose](https://developer.android.com/jetpack),
-[OkHttp](https://square.github.io/okhttp/), [Coil](https://coil-kt.github.io/coil/),
-[kotlinx](https://github.com/Kotlin) serialization & coroutines,
-[multiplatform-markdown-renderer](https://github.com/mikepenz/multiplatform-markdown-renderer),
-[Reorderable](https://github.com/Calvin-LL/Reorderable), [ACRA](https://github.com/ACRA/acra)
-(all Apache-2.0), and [Shizuku](https://github.com/RikkaApps/Shizuku-API) (MIT).
 
 ---
 
@@ -215,8 +196,7 @@ work is distributed under GPLv3. Bundled third-party licenses are listed in
 - **Issues**: Bug reports, feature requests and discussion via
   [GitHub Issues](https://github.com/OpenMinis/OpenMinis/issues)
 
-This repository is a mirror of a private development tree, so it **does not
-accept pull requests** — there is nowhere for them to land. Issues are the way
-to shape the product, and [AwesomeMinis](https://github.com/OpenMinis/AwesomeMinis)
-and [MinisSkills](https://github.com/OpenMinis/MinisSkills) both do take
-contributions. See [CONTRIBUTING.md](CONTRIBUTING.md).
+This repository is a private development tree, so it does **not** accept pull
+requests — there is nowhere for them to land. `CONTRIBUTING.md` and the GitHub
+issue / PR templates were removed along with the Android line: they only
+described a contribution flow this repository never had.
