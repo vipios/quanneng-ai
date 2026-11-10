@@ -62,6 +62,11 @@ def main():
         # 三引号冲突检查
         if '"""' in body:
             sys.exit("%s 正文含三引号冲突" % fname)
+        # 反斜杠转义：Swift 三引号字符串里 `\` 仍是转义字符，
+        # 正文里的字面反斜杠（如 `人格\*.txt`、`gau DOMAIN \| anew`、
+        # 正则 `\d`、路径）必须写成 `\\` 才能原样保留。
+        # md 是纯文本，反斜杠都是字面量，无「意图转义」的 \n，直接全转。
+        body = body.replace("\\", "\\\\")
         bodies.append((cid, body))
 
     header = (
