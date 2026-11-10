@@ -77,7 +77,7 @@ struct SkillsCatalogView: View {
                 footerNote
             }
         }
-        .background(Color(.systemGroupedBackground))
+        .background(Color(uiColor: .systemGroupedBackground))
         .navigationTitle("技能")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -148,7 +148,7 @@ struct SkillsCatalogView: View {
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
-        .background(Color(.secondarySystemGroupedBackground))
+        .background(Color(uiColor: .secondarySystemGroupedBackground))
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         .padding(.horizontal, 16)
         .padding(.top, 10)
@@ -161,7 +161,7 @@ struct SkillsCatalogView: View {
             HStack {
                 Text("自动路由试用")
                     .font(.system(size: 14, weight: .medium))
-                    .foregroundStyle(Color(.label))
+                    .foregroundStyle(Color(uiColor: .label))
                 Spacer()
                 Text("打一句话，看它自己判到哪")
                     .font(.system(size: 12))
@@ -183,7 +183,7 @@ struct SkillsCatalogView: View {
                 HStack(spacing: 6) {
                     Text(p.line)
                         .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(Color(.label))
+                        .foregroundStyle(Color(uiColor: .label))
                     if p.hit.isEmpty {
                         Text("· 泛化口径")
                             .font(.system(size: 12))
@@ -208,10 +208,10 @@ struct SkillsCatalogView: View {
                         } label: {
                             Text(s)
                                 .font(.system(size: 12))
-                                .foregroundStyle(Color(.label))
+                                .foregroundStyle(Color(uiColor: .label))
                                 .padding(.horizontal, 10)
                                 .padding(.vertical, 4)
-                                .background(Color(.tertiarySystemFill))
+                                .background(Color(uiColor: .tertiarySystemFill))
                                 .clipShape(Capsule())
                         }
                         .buttonStyle(.plain)
@@ -221,7 +221,7 @@ struct SkillsCatalogView: View {
             .padding(.top, 10)
         }
         .padding(14)
-        .background(Color(.secondarySystemGroupedBackground))
+        .background(Color(uiColor: .secondarySystemGroupedBackground))
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         .padding(.horizontal, 16)
         .padding(.top, 14)
@@ -257,11 +257,11 @@ struct SkillsCatalogView: View {
                     .font(.system(size: 12, weight: .semibold))
                     .opacity(0.7)
             }
-            .foregroundStyle(isOn ? .white : Color(.label))
+            .foregroundStyle(isOn ? .white : Color(uiColor: .label))
             .padding(.horizontal, 12)
             .padding(.vertical, 6)
             .background(
-                isOn ? SettingsDesign.blue : Color(.secondarySystemGroupedBackground)
+                isOn ? SettingsDesign.blue : Color(uiColor: .secondarySystemGroupedBackground)
             )
             .clipShape(Capsule())
         }
@@ -277,11 +277,11 @@ struct SkillsCatalogView: View {
                 .frame(width: 7, height: 7)
             Text(cat.name)
                 .font(.system(size: 12.5, weight: .semibold))
-                .foregroundStyle(Color(.secondaryLabel))
+                .foregroundStyle(Color(uiColor: .secondaryLabel))
             Spacer()
             Text("\(count) 个域")
                 .font(.system(size: 11.5))
-                .foregroundStyle(Color(.tertiaryLabel))
+                .foregroundStyle(Color(uiColor: .tertiaryLabel))
         }
         .padding(.horizontal, 20)
         .padding(.top, 16)
@@ -299,10 +299,10 @@ struct SkillsCatalogView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(item.name)
                     .font(.system(size: 14.5))
-                    .foregroundStyle(Color(.label))
+                    .foregroundStyle(Color(uiColor: .label))
                 Text(item.detail)
                     .font(.system(size: 12))
-                    .foregroundStyle(Color(.secondaryLabel))
+                    .foregroundStyle(Color(uiColor: .secondaryLabel))
                     .lineSpacing(2)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -311,7 +311,7 @@ struct SkillsCatalogView: View {
         .padding(.vertical, 11)
         .overlay(alignment: .top) {
             Rectangle()
-                .fill(Color(.separator))
+                .fill(Color(uiColor: .separator))
                 .frame(height: 0.5)
                 .padding(.leading, 32)
         }
@@ -335,7 +335,7 @@ struct SkillsCatalogView: View {
     private var footerNote: some View {
         Text("257 个原技能已合并成这一个：空壳与重复项已删，40 份完整方法论原文留在 references/deep/，按需读取。")
             .font(.system(size: 12))
-            .foregroundStyle(Color(.tertiaryLabel))
+            .foregroundStyle(Color(uiColor: .tertiaryLabel))
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 20)
             .padding(.top, 20)

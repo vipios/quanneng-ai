@@ -103,7 +103,7 @@ struct SoulSettingsView: View {
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
-        .background(Color(.secondarySystemGroupedBackground))
+        .background(Color(uiColor: .secondarySystemGroupedBackground))
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         .padding(.horizontal, 16)
         .padding(.top, 10)
@@ -187,7 +187,7 @@ struct SoulSettingsView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: 13, style: .continuous)
-                .fill(isOn ? Color(SettingsDesign.blue).opacity(0.04) : Color(.secondarySystemGroupedBackground))
+                .fill(isOn ? Color(SettingsDesign.blue).opacity(0.04) : Color(uiColor: .secondarySystemGroupedBackground))
         )
         .overlay(alignment: .leading) {
             // 左侧色条
@@ -265,7 +265,7 @@ struct SoulSettingsView: View {
                     .padding(.top, 12)
             }
             .padding(14)
-            .background(Color(.secondarySystemGroupedBackground))
+            .background(Color(uiColor: .secondarySystemGroupedBackground))
             .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
             .padding(.horizontal, 16)
         }
@@ -310,7 +310,7 @@ struct SoulSettingsView: View {
                     }
                 }
             }
-            .background(Color(.secondarySystemGroupedBackground))
+            .background(Color(uiColor: .secondarySystemGroupedBackground))
             .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
             .padding(.horizontal, 16)
         }
@@ -348,7 +348,7 @@ struct SoulSettingsView: View {
                 }
             }
             .padding(10)
-            .background(Color(.secondarySystemGroupedBackground))
+            .background(Color(uiColor: .secondarySystemGroupedBackground))
             .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
             .padding(.horizontal, 16)
 
