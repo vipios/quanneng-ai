@@ -1406,12 +1406,7 @@ struct AIChatView: View {
             refreshTitlePillSession()
         }
         .onChange(of: shareCoordinator.bufferVersion) { newVersion in
-            // Warm start: user is already in a session when share arrives
-            let shareSid = sessionId ?? "nil"
-            let shareDraft = draftId ?? "nil"
-            let shareHasBuffer = shareCoordinator.pendingShareBuffer != nil
-            minisLogger.info("[Share] AIChatView.onChange(bufferVersion)=\(newVersion) sessionId=\(shareSid) draftId=\(shareDraft) hasBuffer=\(shareHasBuffer)")
-            injectPendingShareIfNeeded()
+            handleShareBufferChange(newVersion: newVersion)
         }
         // [T-pop-keyboard-flash-home] Release the keyboard when the pop starts
         // (back button) or commits (swipe released) — see ViewWillDisappearHook.
@@ -1740,6 +1735,20 @@ struct AIChatView: View {
     // 单独拆哪一行都只是把下一行顶上来。
     //
     // 抽成独立方法后闭包只剩一行调用。方法体原样搬过来，逻辑没改。
+    // [R45-编译超时] 这个 .onChange(bufferVersion) 闭包和 handleAppear /
+    // handleDisappear 是同一类问题：多语句闭包直接写在 body 的 ViewBuilder
+    // 链上，巨型 struct 的类型推断预算在整条链上展开，超了就报
+    // "unable to type-check in reasonable time"，行号随机游走
+    // （1398→1401→1413）。抽成独立方法后闭包只剩一行调用。
+    private func handleShareBufferChange(newVersion: Int) {
+        // Warm start: user is already in a session when share arrives
+        let shareSid = sessionId ?? "nil"
+        let shareDraft = draftId ?? "nil"
+        let shareHasBuffer = shareCoordinator.pendingShareBuffer != nil
+        minisLogger.info("[Share] AIChatView.onChange(bufferVersion)=\(newVersion) sessionId=\(shareSid) draftId=\(shareDraft) hasBuffer=\(shareHasBuffer)")
+        injectPendingShareIfNeeded()
+    }
+
     private func handleAppear() {
         wireComposerActions()
         // [OpenMinis#433] Back on screen with a page popped off it: this
