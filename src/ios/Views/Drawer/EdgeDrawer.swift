@@ -150,12 +150,30 @@ struct DrawerContainer<Drawer: View, Content: View>: View {
                 .allowsHitTesting(state.progress > 0.02)
 
             // ── 手势层 ──
-            // 单独铺一层透明的 UIHostingController 承载 UIPanGestureRecognizer。
+            // 单独铺一层透明的 UIView 承载 UIPanGestureRecognizer。
             // 不用 SwiftUI 的 DragGesture 是因为它拿不到「起手点在不在屏幕
             // 左边缘」—— DragGesture 只给相对位移，而我们需要绝对坐标来判断
             // 是否从边缘起手。混用 UIKit 手势识别器是这里最省事的做法。
+            //
+            // [R32-整页点不动] 这一层必须**只占左边缘那一条**，不能铺满全屏。
+            //
+            // 之前是全屏 frame + allowsHitTesting(true)，靠
+            // `PassthroughView.point(inside:)` 在远离左边缘处返回 false 来
+            // 放行触摸。这在纯 UIKit 里成立（hitTest 会跳过返回 nil 的
+            // subview 继续找兄弟），但这里不成立：ZStack 里的其它内容由
+            // SwiftUI 画在 layer 上，不是能接住 hitTest 的兄弟 UIView。
+            // 于是 nil 没有东西可回退，这一次触摸被直接丢弃。
+            //
+            // 症状就是：边缘右滑拉抽屉一切正常，但整页所有按钮
+            // （欢迎页三步、齿轮、会话行、返回箭头）全都点不动。
+            // 因为手势层本身是活的，所以看起来像「只有点击坏了」。
+            //
+            // 收窄到 edgeSlop 宽之后，这条窄带之外的触摸根本不会命中这个
+            // representable，SwiftUI 自己的命中判定接管；窄带之内的行为
+            // 和以前完全一致（右滑拉开 / 左滑收回）。
             EdgePanOverlay(state: state, drawerWidth: drawerWidth)
-                .allowsHitTesting(true)
+                .frame(width: DrawerState.edgeSlop)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
         }
         .environmentObject(state)
     }

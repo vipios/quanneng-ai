@@ -56,6 +56,9 @@ struct SessionDrawer: View {
     /// 搜索框焦点
     @FocusState private var searchFocused: Bool
 
+    /// 产物总数只用于标题副行。订阅单例而不是另开入参。
+    @ObservedObject private var artifacts = ArtifactStore.shared
+
     var body: some View {
         VStack(spacing: 0) {
 
@@ -64,6 +67,12 @@ struct SessionDrawer: View {
 
             // ── 搜索 ──
             searchBar
+
+            // ── 两个入口：搜索框正下方同一行 ──
+            // [R32-入口位置] 原先挂在 VStack 最末尾（底部那条），设计稿
+            // （联动模板-完整.html 的 .dw-actions）是紧贴搜索框下方一行居中。
+            // 底部那条会随列表长度浮动，越长的列表越难够到；放上面是固定位置。
+            entryRow
 
             // ── 列表 ──
             ScrollView {
@@ -80,17 +89,15 @@ struct SessionDrawer: View {
                 .padding(.bottom, 76)
             }
             .scrollDismissesKeyboard(.interactively)
-
-            // ── 底部 ──
-            bottomBar
         }
         .background(Color(.systemGroupedBackground))
         // [R28-设置入口右下角] 设置入口从导航栏 `.topBarLeading` 挪到这里：
         // 抽屉右下角一枚 52pt 悬浮齿轮，点它直接开原版 SettingsSheet。
         //
-        // 刻意用 overlay 而不是塞进 VStack：底部那两个按钮是等宽的
-        // 「全部产物 / 新建任务」，插一个齿轮进去会把它们挤窄。
-        // overlay 让齿轮浮在列表之上、按钮区之外，两者互不影响。
+        // 用 overlay 而不是塞进 VStack：齿轮要浮在列表之上、入口行之外，
+        // 两者互不影响。R32 把入口行挪到搜索框下方之后，齿轮的 bottom
+        // 内边距从 70 收到 14 —— 那个 70 是给底部按钮区让位的，按钮走了
+        // 它就得跟着走，否则齿轮会停在半空。
         .overlay(alignment: .bottomTrailing) {
             settingsGear
         }
@@ -129,9 +136,9 @@ struct SessionDrawer: View {
         }
         .buttonStyle(.plain)
         .padding(.trailing, 14)
-        // 70 = 底部按钮区 54 + 间隙 16。两个 padding 分开写会被叠加成 70 以下的
-        // 两层缩进，齿轮就飘到按钮中间了，所以合成一个数。
-        .padding(.bottom, 70)
+        // R32：底部按钮区挪走后这里从 70 收到 14。70 = 旧底部按钮 54 + 间隙 16，
+        // 留着会让齿轮悬在列表中间。
+        .padding(.bottom, 14)
         .accessibilityLabel("设置")
     }
 
@@ -148,12 +155,12 @@ struct SessionDrawer: View {
         // 用 ZStack 后两件事解耦：标题按整条宽度居中（不管右边有没有按钮），
         // 按钮单独贴右。这样以后加第二个按钮也不会再动标题的位置。
         ZStack {
-            VStack(spacing: 1) {
+            VStack(spacing: 2) {
                 Text(sidebarTitle)
-                    .font(.system(size: 26, weight: .bold))
+                    .font(.system(size: 27, weight: .bold))
                     .lineLimit(1)
                 Text(subtitle)
-                    .font(.system(size: 11))
+                    .font(.system(size: 12.5))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
@@ -189,9 +196,13 @@ struct SessionDrawer: View {
     }
 
     private var sidebarTitle: String {
-        // 与原版一致：优先 SOUL.md 里的名字，没配就用 App 名。
-        let n = SoulStore.cachedMetadata.name
-        return n.isEmpty ? "全能AI" : n
+        // 固定「全能AI管理」。
+        //
+        // [R32-标题对不齐设计] 这里原先是 `SoulStore.cachedMetadata.name`，
+        // 没配过人格名时上游给的是 App 名，于是抽屉顶上一直显示「Minis」。
+        // 设计稿（联动模板-完整.html 的 .dw-title）写死的是「全能AI管理」，
+        // 而且它是侧栏的身份标识，不该跟着用户改人格名一起漂。
+        "全能AI管理"
     }
 
     private var subtitle: String {
@@ -199,7 +210,18 @@ struct SessionDrawer: View {
             let n = sessionMatchCount + artifactMatches.count
             return n == 0 ? "没找到" : "找到 \(n) 项"
         }
-        return "\(sessions.count) 个会话"
+        // 设计稿的副标题是两个数：对话数 · 产物数，不是只有会话数。
+        let a = artifactTotal
+        return a > 0 ? "\(sessions.count) 个对话 · \(a) 个产物" : "\(sessions.count) 个对话"
+    }
+
+    /// 产物总数。设计稿标题下那个「32 个产物」就是它。
+    ///
+    /// 直接读单例而不是从 ContentView 传：这个数只用来显示一行字，
+    /// 为它多开一条参数据通道不划算，而且 `ArtifactStore` 本来就是
+    /// `@MainActor` 单例，@ObservedObject 能跟着它自己刷。
+    private var artifactTotal: Int {
+        artifacts.groups.reduce(0) { $0 + $1.items.count }
     }
 
     // MARK: 搜索
@@ -210,7 +232,7 @@ struct SessionDrawer: View {
                 .font(.system(size: 13, weight: .medium))
                 .foregroundStyle(.secondary)
 
-            TextField("搜对话和产物", text: $query)
+            TextField("搜索对话与产物", text: $query)
                 .textFieldStyle(.plain)
                 .font(.system(size: 15))
                 .focused($searchFocused)
@@ -444,17 +466,64 @@ struct SessionDrawer: View {
         .padding(.top, 60)
     }
 
-    // MARK: 底部
+    // MARK: 入口行
 
-    private var bottomBar: some View {
-        HStack(spacing: 8) {
+    /// 搜索框正下方一行两枚入口：「全部产物」「新建任务」。
+    ///
+    /// 照设计稿 `.dw-actions / .dw-entry` 落：两枚等宽、46pt 高、圆角 12、
+    /// 白卡底 + 极细投影；左枚图标上叠数量角标 + 右侧 chevron，
+    /// 右枚是蓝色系的 primary 样式。
+    ///
+    /// 为什么入口放上面而不是像以前那样钉在底部：底部那条要吃掉一整个
+    /// safeAreaInset，抽屉里又没有列表留白去垫它，会话一多就顶到脸前；
+    /// 设计稿把它固定在搜索框下面，位置不随列表长度漂。
+    private var entryRow: some View {
+        HStack(spacing: 10) {
             Button(action: onOpenAllArtifacts) {
-                Text("全部产物")
-                    .font(.system(size: 14, weight: .medium))
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 9)
-                    .background(Color(.tertiarySystemFill),
-                                in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                HStack(spacing: 7) {
+                    // 图标 + 右上角数量角标。角标单独叠一层而不是塞进 HStack，
+                    // 塞进去会把「全部产物」四个字挤掉（设计稿注释原话）。
+                    Image(systemName: "folder")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(Color(.systemIndigo))
+                        .frame(width: 27, height: 27)
+                        .background(Color(.systemIndigo).opacity(0.12),
+                                    in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        .overlay(alignment: .topTrailing) {
+                            if artifactTotal > 0 {
+                                Text(artifactTotal > 99 ? "99+" : "\(artifactTotal)")
+                                    .font(.system(size: 9.5, weight: .bold))
+                                    .foregroundStyle(.white)
+                                    .padding(.horizontal, 4)
+                                    .frame(minWidth: 15, minHeight: 15)
+                                    .background(Color(.systemIndigo), in: Capsule())
+                                    .overlay {
+                                        Capsule().strokeBorder(Color(.secondarySystemGroupedBackground),
+                                                               lineWidth: 1.6)
+                                    }
+                                    .offset(x: 5, y: -4)
+                            }
+                        }
+
+                    Text("全部产物")
+                        .font(.system(size: 15, weight: .medium))
+                        .foregroundStyle(Color(.label))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.85)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(Color(.tertiaryLabel))
+                }
+                .padding(.horizontal, 12)
+                .frame(maxWidth: .infinity, minHeight: 46)
+                .background(Color(.secondarySystemGroupedBackground),
+                            in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .strokeBorder(Color(.separator).opacity(0.4), lineWidth: 0.5)
+                }
             }
             .buttonStyle(.plain)
 
@@ -462,24 +531,29 @@ struct SessionDrawer: View {
                 onNewChat()
                 drawerState.close()
             } label: {
-                Text("新建任务")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 9)
-                    .background(Color.accentColor,
-                                in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                HStack(spacing: 7) {
+                    Image(systemName: "plus")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(Color.accentColor)
+                        .frame(width: 27, height: 27)
+                        .background(Color.accentColor.opacity(0.14),
+                                    in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+
+                    Text("新建任务")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(Color.accentColor)
+                        .lineLimit(1)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .padding(.horizontal, 12)
+                .frame(maxWidth: .infinity, minHeight: 46)
+                .background(Color.accentColor.opacity(0.09),
+                            in: RoundedRectangle(cornerRadius: 12, style: .continuous))
             }
             .buttonStyle(.plain)
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(.bar)
-        .overlay(alignment: .top) {
-            Rectangle()
-                .fill(Color(.separator))
-                .frame(height: 0.5)
-        }
+        .padding(.horizontal, 18)
+        .padding(.bottom, 10)
     }
 }
 
