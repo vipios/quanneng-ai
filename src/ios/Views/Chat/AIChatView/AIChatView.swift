@@ -539,6 +539,24 @@ struct AIChatView: View {
     /// (file was deleted, the session was pruned, or iCloud hasn't synced yet).
     @State var missingMinisFileName: String?
 
+    /// [R45-编译超时] 左滑返回探针抽成独立 @ViewBuilder，不写进 body。
+    ///
+    /// body 里 `.overlay { if hSizeClass == .compact { ... } }` 这种带条件
+    /// 分支的 ViewBuilder 闭包，是 Swift 类型检查最经典的超时形态 ——
+    /// 编译器要在 body 那条 ~80 个修饰符的链上，为 `if` 的两个分支做
+    /// opaque `some View` 类型合并，巨型 struct 的推断预算直接被顶破，
+    /// 报 "unable to type-check in reasonable time" 且行号随机游走。
+    /// 抽成独立属性后，body 里只剩 `.overlay { swipeBackProbe }` 一层
+    /// 简单引用，类型推断压力归零。
+    @ViewBuilder
+    private var swipeBackProbe: some View {
+        if hSizeClass == .compact {
+            SwipeBackEnabler()
+                .frame(width: 0, height: 0)
+                .allowsHitTesting(false)
+        }
+    }
+
     var body: some View {
         // [R44-编译超时] 抽屉/返回的两个闭包提前落成局部量，避免在
         // ChatToolbarHost 调用点做嵌套闭包推断（map { { open() } } 和
@@ -840,13 +858,7 @@ struct AIChatView: View {
         // 隐患。overlay 挂一个零尺寸、不吃触摸的探针，位置无关紧要 ——
         // 它只负责抓一下导航控制器。
         .navigationBarBackButtonHidden(hSizeClass == .compact)
-        .overlay {
-            if hSizeClass == .compact {
-                SwipeBackEnabler()
-                    .frame(width: 0, height: 0)
-                    .allowsHitTesting(false)
-            }
-        }
+        .overlay { swipeBackProbe }
         // [T-ios-navbar-menu-baritem] Outside the equatable host on purpose:
         // its update pass is what refreshes the menu's action closures.
         .background(navBarMenuInstaller)
