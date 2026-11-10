@@ -9131,6 +9131,36 @@ window.MS = {
     closeDrawer: function () { try { closeDrawer(); } catch (e) {} },
     openSettings: function () { try { closeDrawer(); enterSettings(); } catch (e) {} },
 
+    /* ---------- 跟手（R38） ----------
+       手势期间由原生逐帧调用，把抽屉摆到手指当前位置。
+       以前原生只给「开 / 关」两态，手指一动就整块跳到终点，
+       看起来像闪现。现在拖动时走这里，松手才交给
+       openDrawer / closeDrawer 用设计稿自己的曲线收尾。 */
+    dragTo: function (p) {
+      try {
+        var d = document.getElementById('drawer');
+        if (!d) return;
+        var w = d.getBoundingClientRect().width || 318;
+        /* 拖动期间必须关掉 transition，否则每帧的 transform 都会被
+           0.34s 的缓动追着跑，手指停下画面还在飘。 */
+        d.style.transition = 'none';
+        d.style.transform = 'translateX(' + ((p - 1) * w).toFixed(2) + 'px)';
+        var s = document.getElementById('scrim');
+        if (s) s.style.opacity = String(p);
+      } catch (e) {}
+    },
+
+    /* 松手：先把 inline 的 transition:none 清掉，再走模板原本的
+       openDrawer / closeDrawer —— 恢复那条 cubic-bezier(.32,.72,0,1)。
+       顺序不能反，反了就是「瞬间到位」。 */
+    dragEnd: function (open) {
+      try {
+        var d = document.getElementById('drawer');
+        if (d) { d.style.transition = ''; }
+        if (open) { openDrawer(); } else { closeDrawer(); }
+      } catch (e) {}
+    },
+
     /* 真实数据。结构和模板内置的 DATA 完全一致：
        [{id:'会话uuid', title:'会话名', items:[{n:'文件名', k:'code|doc|image|data|archive|video', s:'大小', t:'时间'}]}]
        之所以沿用同一结构，是为了让 renderDrawer / renderFold / 搜索
@@ -9178,6 +9208,29 @@ window.MS = {
       } catch (e) {}
     }
   };
+
+  /* ---------- 点抽屉外部收回（R38） ----------
+     原生那边原来只在屏幕最右 72pt 铺了一条透明热区，抽屉 318pt 宽，
+     实际可用区域就是那一条，手指稍微偏左就点不动。这里直接在模板里
+     按「点到的元素是不是抽屉的后代」判定，整块外部都算，且和抽屉
+     真实几何绑定，不依赖原生算的宽度。
+
+     三个前提条件缺一不可：
+       1. 抽屉确实开着；
+       2. 没有全屏二级页（.page.in）盖着 —— 那时代码归页面自己的返回键；
+       3. 点到的不是 #drawer 内部，也不是模态框 / 分享面板。
+     用 'click' 而不是 pointerdown：指针按下就关会让「按住抽屉往里
+     拖一点再松手」误触；click 只在完整点击后触发。 */
+  document.addEventListener('click', function (e) {
+    var t = e.target;
+    if (!t || !t.closest) return;
+    if (document.querySelector('.page.in')) return;
+    if (t.closest('#drawer')) return;
+    if (t.closest('.modal.on') || t.closest('.share.on')) return;
+    var d = document.getElementById('drawer');
+    if (!d || !d.classList.contains('open')) return;
+    try { closeDrawer(); } catch (err) {}
+  }, false);
 
   /* ---------- 1. 页面 → 原生 ---------- */
   // 点会话行：模板自己会 renderChat（那是假消息），原生收到后真正切会话。

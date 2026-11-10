@@ -91,6 +91,23 @@ final class TemplateUIHost: ObservableObject {
         call("window.__MS__ && window.__MS__.closeDrawer()")
     }
 
+    /// 手势拖动期间调用：把抽屉摆到手指当前位置。
+    ///
+    /// `p` 是 0…1 的展开进度。模板那边会关掉 transition 直接改 transform，
+    /// 所以调用频率跟着手势帧走也不会看到缓动拖尾。
+    func dragTo(_ p: CGFloat) {
+        let v = min(max(Double(p), 0), 1)
+        call("window.__MS__ && window.__MS__.dragTo(\(String(format: "%.4f", v)))")
+    }
+
+    /// 松手：交回模板自己的 cubic-bezier 收尾。
+    ///
+    /// 不直接在 dragTo 里做，是因为拖动结束和「progress 变到 0/1」不一定
+    /// 同时发生（比如拖到一半松手、判定为回到原位，progress 值没变）。
+    func dragEnd(open: Bool) {
+        call("window.__MS__ && window.__MS__.dragEnd(\(open ? "true" : "false"))")
+    }
+
     /// 灌真实数据。
     ///
     /// 走 base64 而不是把 JSON 拼进 JS 字面量：会话标题里有引号、

@@ -180,15 +180,38 @@ struct DrawerContainer<Drawer: View, Content: View>: View {
             if useTemplate {
                 TemplateUIWebView(host: template)
                     .allowsHitTesting(template.wantsInteraction || state.progress > 0.02)
-                    // 手势只给出「开/关」两态，中间的跟手位移交给模板自己的
-                    // CSS transition —— 设计稿的动画曲线就写在那儿。
-                    // 每帧 evaluateJavaScript 去改 transform 会掉帧，而且
-                    // 拿不到模板里那条 cubic-bezier。
+                    // 跟手（R38）。
+                    //
+                    // 以前这里只把 progress 折成「开 / 关」两态再交给模板的
+                    // CSS transition，于是手指刚动 10pt，抽屉就整块弹到终点，
+                    // 中间没有位移 —— 用户的反馈就是「直接就出来，不好看」。
+                    //
+                    // 现在拖动期间逐帧把 progress 直接推给模板的 dragTo()，
+                    // 抽屉停在手指当前位置；只有松手（dragging 变回 false）
+                    // 才调用 openDrawer / closeDrawer，交给设计稿自己的
+                    // cubic-bezier(.32,.72,0,1) 收尾。
+                    //
+                    // 每帧一次 evaluateJavaScript 的代价：这里只在手势期间
+                    // 调用，一帧最多一次，且模板里只改一个 transform + 一个
+                    // opacity，实测不会掉帧（真机待验）。
                     .onChange(of: state.progress) { p in
-                        if p > 0.5 {
-                            template.openDrawer()
+                        if state.dragging {
+                            template.dragTo(p)
                         } else {
-                            template.closeDrawer()
+                            // 松手后（含代码里主动 open/close）走模板自己的动画。
+                            if p > 0.5 {
+                                template.openDrawer()
+                            } else {
+                                template.closeDrawer()
+                            }
+                        }
+                    }
+                    // 拖动结束的那一帧要把最终吸附结果告诉模板，
+                    // 因为 onChange(of: progress) 在松手后可能不再触发
+                    // （progress 已到 0 或 1，值没变）。
+                    .onChange(of: state.dragging) { dragging in
+                        if !dragging {
+                            template.dragEnd(open: state.progress > 0.5)
                         }
                     }
                     // 反向同步：模板自己也会关抽屉。

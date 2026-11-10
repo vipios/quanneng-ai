@@ -1127,16 +1127,33 @@ struct ContentView: View {
                 case 3:
                     break
                 default:
-                    if !sessions.isEmpty,
-                       let latest = sessions.first,
-                       Date().timeIntervalSince(latest.updatedAt) > 15 * 60 {
+                    // [R38-必进聊天] 出厂默认就是要落在聊天界面（有输入框那屏）。
+                    // 引导页删掉以后，「什么都不做 → 停在空列表」这个分支
+                    // 等于一片白底 + 一个 FAB，用户会当成卡死（build 37 真机实录）。
+                    // 所以三条路径里无论走哪条，最后都必须有一个会话被打开。
+                    if sessions.isEmpty {
+                        // 一次都没聊过：直接开一个新会话。
                         var tx = Transaction()
                         tx.disablesAnimations = true
                         withTransaction(tx) { openSession(Self.makeNewSessionId()) }
-                    } else if isWideLayout, let latest = sessions.first {
+                    } else if let latest = sessions.first,
+                              Date().timeIntervalSince(latest.updatedAt) > 15 * 60 {
+                        // 隔了 15 分钟以上：开新会话（原版行为，保留）。
+                        var tx = Transaction()
+                        tx.disablesAnimations = true
+                        withTransaction(tx) { openSession(Self.makeNewSessionId()) }
+                    } else if let latest = sessions.first {
+                        // 15 分钟内：接着上次那个会话。
+                        // 以前这一条只在 iPad 分栏（isWideLayout）才执行，
+                        // iPhone 上直接掉到「什么都不开」，于是白屏。
                         var tx = Transaction()
                         tx.disablesAnimations = true
                         withTransaction(tx) { openSession(latest.id) }
+                    } else {
+                        // sessions 非空但取不到 first（并发删除的瞬间）：兜底开新的。
+                        var tx = Transaction()
+                        tx.disablesAnimations = true
+                        withTransaction(tx) { openSession(Self.makeNewSessionId()) }
                     }
                 }
             }
