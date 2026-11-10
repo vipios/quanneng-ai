@@ -638,6 +638,8 @@
 		RCL000120 /* BackupCategoryIcon.swift in Sources */ = {isa = PBXBuildFile; fileRef = RCL000220 /* BackupCategoryIcon.swift */; };
 		RCL000121 /* BackupHUD.swift in Sources */ = {isa = PBXBuildFile; fileRef = RCL000221 /* BackupHUD.swift */; };
 		FD2A00000000000000000001 /* EdgeDrawer.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD1A00000000000000000001 /* EdgeDrawer.swift */; };
+		FD2A00000000000000000002 /* TemplateUIView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD1A00000000000000000002 /* TemplateUIView.swift */; };
+		FD2A00000000000000000003 /* UITemplate in Resources */ = {isa = PBXBuildFile; fileRef = FD1A00000000000000000003 /* UITemplate */; };
 		FD2A00000000000000000002 /* SessionDrawer.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD1A00000000000000000002 /* SessionDrawer.swift */; };
 		FD2A00000000000000000003 /* AllArtifactsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD1A00000000000000000003 /* AllArtifactsView.swift */; };
 		FD2A00000000000000000004 /* ContentView+Drawer.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD1A00000000000000000004 /* ContentView+Drawer.swift */; };
@@ -1485,6 +1487,8 @@
 		RCL000220 /* BackupCategoryIcon.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackupCategoryIcon.swift; sourceTree = "<group>"; };
 		RCL000221 /* BackupHUD.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackupHUD.swift; sourceTree = "<group>"; };
 		FD1A00000000000000000001 /* EdgeDrawer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EdgeDrawer.swift; sourceTree = "<group>"; };
+		FD1A00000000000000000002 /* TemplateUIView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TemplateUIView.swift; sourceTree = "<group>"; };
+		FD1A00000000000000000003 /* UITemplate */ = {isa = PBXFileReference; lastKnownFileType = folder; name = UITemplate; path = Resources/UITemplate; sourceTree = "<group>"; };
 		FD1A00000000000000000002 /* SessionDrawer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionDrawer.swift; sourceTree = "<group>"; };
 		FD1A00000000000000000003 /* AllArtifactsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AllArtifactsView.swift; sourceTree = "<group>"; };
 		FD1A00000000000000000004 /* ContentView+Drawer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ContentView+Drawer.swift"; sourceTree = "<group>"; };
@@ -1755,6 +1759,7 @@
 				E5A000011 /* default_mount */,
 				E5A000A11 /* AOJITRestore */,
 				E5U000012 /* KaTeX */,
+				FD1A00000000000000000003 /* UITemplate */,
 				E5V000012 /* AlternateIcons */,
 				E5D00060 /* models-dev-api.json */,
 				E5JB00014 /* jieba.dict.utf8 */,
@@ -2075,6 +2080,7 @@
 			isa = PBXGroup;
 			children = (
 				FD1A00000000000000000001 /* EdgeDrawer.swift */,
+				FD1A00000000000000000002 /* TemplateUIView.swift */,
 				FD1A00000000000000000002 /* SessionDrawer.swift */,
 				FD1A00000000000000000003 /* AllArtifactsView.swift */,
 				FD1A00000000000000000004 /* ContentView+Drawer.swift */,
@@ -3079,6 +3085,7 @@
 				E5A000001 /* default_mount in Resources */,
 				E5A000A01 /* AOJITRestore in Resources */,
 				E5U000002 /* KaTeX in Resources */,
+				FD2A00000000000000000003 /* UITemplate in Resources */,
 				E5V000002 /* AlternateIcons in Resources */,
 				AA71B0222F44BEB200A28A5E /* Launch Screen.storyboard in Resources */,
 				E51000003 /* Assets.xcassets in Resources */,
@@ -3203,6 +3210,7 @@
 				FF2A00000000000000000002 /* RouteRules.swift in Sources */,
 				FF2A00000000000000000003 /* RouteInjector.swift in Sources */,
 				FD2A00000000000000000001 /* EdgeDrawer.swift in Sources */,
+				FD2A00000000000000000002 /* TemplateUIView.swift in Sources */,
 				FD2A00000000000000000002 /* SessionDrawer.swift in Sources */,
 				FD2A00000000000000000003 /* AllArtifactsView.swift in Sources */,
 				FD2A00000000000000000004 /* ContentView+Drawer.swift in Sources */,

@@ -104,33 +104,68 @@ struct DrawerContainer<Drawer: View, Content: View>: View {
 
     @StateObject private var state = DrawerState()
 
-    /// 抽屉宽度。由外部传入的几何宽度算出，避免在容器内部再套一层
-    /// GeometryReader（那会让内容视图丢掉父级给的尺寸约束）。
+    /// 模板模式（R37 起默认）：抽屉层不是 SwiftUI 视图，而是
+    /// `TemplateUIWebView` 全屏铺着，抽屉本体由设计稿自己的 CSS 画。
+    /// 这样抽屉的每个像素、每段动画都来自设计稿，不存在复刻偏差。
+    @StateObject private var template = TemplateUIHost()
+    private let useTemplate: Bool
+
+    /// 设计稿里抽屉的宽度（`--drawer-w: 318px`）。
+    /// 用固定值而不是比例：418KB 的模板里那些行高、内边距都是按 318
+    /// 排的，跟着屏幕宽度变会让文字折行位置和设计稿不一致。
+    /// 320pt 的老机型上会自动收窄，见 init。
     private let drawerWidth: CGFloat
+
+    /// 整屏宽度。抽屉态右侧要留一条「点空白关闭」的热区，宽度靠它算。
+    private let totalWidth: CGFloat
 
     private let drawer: (DrawerState) -> Drawer
     private let content: () -> Content
 
-    init(width: CGFloat,
+    /// 模板句柄准备好时回吐给外层。
+    ///
+    /// 为什么需要：数据（会话列表、产物）住在外层的 ContentView 里，
+    /// 而 host 是这里的 @StateObject。加 environmentObject 只能往下传，
+    /// 闭包拿不到；改用「回调交出去、外层存一份」最省事，也不会
+    /// 因为多一层 binding 让整棵树每帧重算。
+    private let onTemplateReady: ((TemplateUIHost) -> Void)?
+
+    init(width: CGFloat, useTemplate: Bool = false,
+         onTemplateReady: ((TemplateUIHost) -> Void)? = nil,
          @ViewBuilder drawer: @escaping (DrawerState) -> Drawer,
          @ViewBuilder content: @escaping () -> Content) {
-        self.drawerWidth = min(width * DrawerState.widthFraction, DrawerState.widthMax)
+        self.totalWidth = width
+        self.useTemplate = useTemplate
+        self.onTemplateReady = onTemplateReady
+
+        // 模板固定 318。只有屏幕本身放不下（< 390）时才按比例收，
+        // 这时抽屉会略窄于设计稿 —— 比让它溢出屏幕好。
+        let fixed: CGFloat = DrawerState.widthMax
+        self.drawerWidth = width >= fixed + 72 ? fixed : min(width * 0.82, fixed)
+
         self.drawer = drawer
         self.content = content
     }
 
+    /// 模板模式下内容区不位移。
+    ///
+    /// 设计稿里抽屉是「从左边滑出来盖在内容上」，不是「内容被推开」，
+    /// 而且它自带的遮罩已经在 App 模式里关掉了（改用原生那层）。
+    /// 这里再 offset 一次，抽屉右下角的齿轮就会跟着飘 —— 设计稿的
+    /// 定位是 `right:16px` 相对抽屉，跟屏幕无关。
+    private var contentShift: CGFloat { useTemplate ? 0 : drawerWidth * state.progress }
+
     var body: some View {
         ZStack(alignment: .leading) {
             // ── 内容层 ──
-            // 抽屉拉开时整块右移并轻微缩小，这是 iOS 上「层级被推开」
-            // 的惯用表达。缩到 0.94 就够，再小会让人以为界面出错了。
             content()
-                .scaleEffect(1 - 0.06 * state.progress, anchor: .trailing)
-                .offset(x: drawerWidth * state.progress)
+                .scaleEffect(1 - 0.06 * state.progress * (useTemplate ? 0 : 1),
+                             anchor: .trailing)
+                .offset(x: contentShift)
                 .overlay(alignment: .leading) {
-                    // 遮罩只在 drawers 拉开时挡内容区。它同时承担
-                    // 「点空白关闭」，这是抽屉的必备出口 —— 只靠边缘
-                    // 手势关闭，一只手拿手机时很难操作。
+                    // 遮罩：抽屉拉开时挡内容区，同时承担「点空白关闭」。
+                    // 模板模式下这层必须留着 —— 模板自己的 `.scrim` 已经
+                    // 在 App 模式里隐藏了，它是唯一的一层。
                     if state.progress > 0.02 {
                         Color.black
                             .opacity(0.32 * Double(state.progress))
@@ -142,40 +177,55 @@ struct DrawerContainer<Drawer: View, Content: View>: View {
                 .disabled(state.isOpen)
 
             // ── 抽屉层 ──
-            drawer(state)
-                .frame(width: drawerWidth)
-                .offset(x: -drawerWidth * (1 - state.progress))
-                // 抽屉完全收起时不要参与命中测试，否则它的右边缘会
-                // 挡住内容区左侧 1pt，点击会莫名没反应。
-                .allowsHitTesting(state.progress > 0.02)
+            if useTemplate {
+                TemplateUIWebView(host: template)
+                    .allowsHitTesting(template.wantsInteraction || state.progress > 0.02)
+                    // 手势只给出「开/关」两态，中间的跟手位移交给模板自己的
+                    // CSS transition —— 设计稿的动画曲线就写在那儿。
+                    // 每帧 evaluateJavaScript 去改 transform 会掉帧，而且
+                    // 拿不到模板里那条 cubic-bezier。
+                    .onChange(of: state.progress) { p in
+                        if p > 0.5 {
+                            template.openDrawer()
+                        } else {
+                            template.closeDrawer()
+                        }
+                    }
+                    // 抽屉态右侧那条热区：模板的 WebView 是全屏的，
+                    // 不补这一层，点抽屉右边空白什么都不会发生 ——
+                    // 而这是用户关抽屉最常用的手势。
+                    .overlay(alignment: .trailing) {
+                        if state.progress > 0.02, !template.pageOpen {
+                            Color.clear
+                                .contentShape(Rectangle())
+                                .frame(width: max(0, totalWidth - drawerWidth))
+                                .onTapGesture { state.close() }
+                        }
+                    }
+            } else {
+                drawer(state)
+                    .frame(width: drawerWidth)
+                    .offset(x: -drawerWidth * (1 - state.progress))
+                    // 抽屉完全收起时不要参与命中测试，否则它的右边缘会
+                    // 挡住内容区左侧 1pt，点击会莫名没反应。
+                    .allowsHitTesting(state.progress > 0.02)
+            }
 
             // ── 手势层 ──
-            // 单独铺一层透明的 UIView 承载 UIPanGestureRecognizer。
+            // 单独铺一层透明的 UIHostingController 承载 UIPanGestureRecognizer。
             // 不用 SwiftUI 的 DragGesture 是因为它拿不到「起手点在不在屏幕
             // 左边缘」—— DragGesture 只给相对位移，而我们需要绝对坐标来判断
             // 是否从边缘起手。混用 UIKit 手势识别器是这里最省事的做法。
-            //
-            // [R32-整页点不动] 这一层必须**只占左边缘那一条**，不能铺满全屏。
-            //
-            // 之前是全屏 frame + allowsHitTesting(true)，靠
-            // `PassthroughView.point(inside:)` 在远离左边缘处返回 false 来
-            // 放行触摸。这在纯 UIKit 里成立（hitTest 会跳过返回 nil 的
-            // subview 继续找兄弟），但这里不成立：ZStack 里的其它内容由
-            // SwiftUI 画在 layer 上，不是能接住 hitTest 的兄弟 UIView。
-            // 于是 nil 没有东西可回退，这一次触摸被直接丢弃。
-            //
-            // 症状就是：边缘右滑拉抽屉一切正常，但整页所有按钮
-            // （欢迎页三步、齿轮、会话行、返回箭头）全都点不动。
-            // 因为手势层本身是活的，所以看起来像「只有点击坏了」。
-            //
-            // 收窄到 edgeSlop 宽之后，这条窄带之外的触摸根本不会命中这个
-            // representable，SwiftUI 自己的命中判定接管；窄带之内的行为
-            // 和以前完全一致（右滑拉开 / 左滑收回）。
             EdgePanOverlay(state: state, drawerWidth: drawerWidth)
-                .frame(width: DrawerState.edgeSlop)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+                .allowsHitTesting(true)
         }
         .environmentObject(state)
+        // 模板句柄给外层用（灌数据、接点击回调）。
+        .environmentObject(template)
+        .task {
+            guard useTemplate else { return }
+            onTemplateReady?(template)
+        }
     }
 }
 

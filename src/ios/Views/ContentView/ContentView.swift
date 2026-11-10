@@ -430,6 +430,14 @@ struct ContentView: View {
     /// （有就带上，没有不重跑 SQL）。
     @State var drawerQuery = ""
 
+    /// 设计稿抽屉的 WebView 句柄。
+    ///
+    /// 抽屉外观全部由 `Resources/UITemplate/ui.html` 渲染，这里只存一份
+    /// 句柄，用来往里灌真实会话/产物、以及接它点回来的动作。
+    /// 由 `DrawerContainer` 在 `onTemplateReady` 里回吐，不自己 new ——
+    /// 那样会创建第二个 WebView，屏幕上出现两份抽屉。
+    @State var templateHost: TemplateUIHost?
+
     /// 是否弹出「全部产物」。
     ///
     /// 不复用 `activeToolSheet`：那是 `ToolSheet` 枚举，加一个 case 就要
@@ -1119,16 +1127,7 @@ struct ContentView: View {
                 case 3:
                     break
                 default:
-                    if sessions.isEmpty {
-                        // [R33-去引导页] 一次都没聊过时也直接进聊天界面。
-                        // 以前这里什么都不做，于是停在空列表上、被那张
-                        // 「欢迎使用 Minis」三步引导盖住。用户要求删掉引导页：
-                        // 进 App 就该看见能打字的界面，配 API 走
-                        // 左滑抽屉 → 右下角齿轮。
-                        var tx = Transaction()
-                        tx.disablesAnimations = true
-                        withTransaction(tx) { openSession(Self.makeNewSessionId()) }
-                    } else if !sessions.isEmpty,
+                    if !sessions.isEmpty,
                        let latest = sessions.first,
                        Date().timeIntervalSince(latest.updatedAt) > 15 * 60 {
                         var tx = Transaction()
