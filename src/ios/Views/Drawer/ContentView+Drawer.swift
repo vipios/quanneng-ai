@@ -42,15 +42,47 @@ extension ContentView {
     /// 而不是分配尺寸，里面的 NavigationStack 会塌成 0 高（对话页整屏空白）。
     func stackLayoutWithDrawer(width: CGFloat) -> some View {
         DrawerContainer(width: width,
-                        useTemplate: true,
+                        // [R42-撤掉外壳] 从 `true` 改成 `false`。
+                        //
+                        // 之前这里是模板模式：抽屉由一份 418KB 的 ui.html
+                        // 在 WKWebView 里渲染，Swift 只负责把它铺满全屏。
+                        // 当时的目标是「像素级还原设计稿」，但代价是长出来
+                        // 一套平行的假界面 —— 模板里那份设置页是照着
+                        // SettingsSheet 抄的副本，点它任何一行都只能落回
+                        // 原生设置首页，用户要再点一次才进得去。
+                        //
+                        // 现在改回原版 SwiftUI 抽屉：功能全是真的，外观参数
+                        // 搬进了 `SettingsDesign`（见 SettingsDesignTokens.swift）。
+                        // 设计稿只当「参数来源」，不再当「界面本体」。
+                        useTemplate: false,
                         onTemplateReady: { host in
                             templateHost = host
                             installTemplateCallbacks(host)
                             pushDrawerData(to: host)
-                        }) { _ in
-            // 模板模式下这个闭包不会被调用（抽屉层是 WebView）。
-            // 保留只是因为 DrawerContainer 是泛型，得给个类型。
-            EmptyView()
+                        }) { drawerState in
+            SessionDrawer(
+                sessions: sessions,
+                folders: folders,
+                groups: groupedSessionIDs(filteredSessions),
+                // 抽屉高亮哪一行 = 屏幕上正在看的那个会话。
+                // iPhone 走导航栈（currentStackSessionId），iPad 走
+                // selectedSessionId，两个都可能是「当前」，取先有值的那个。
+                currentSessionId: currentStackSessionId ?? selectedSessionId,
+                isActive: { sid in sessionIsRunning(sid) },
+                isSuspended: { sid in sidebarConcurrencyManager.isSuspended(sid) },
+                query: $drawerQuery,
+                // 抽屉的搜索是独立的（drawerQuery），不要和侧栏那个
+                // searchText 混用 —— 抽屉收起时侧栏搜索框仍然挂着，
+                // 混用会让抽屉一打开就带着上次的搜索词。
+                isSearching: drawerIsSearching,
+                sessionMatches: drawerSessionMatches,
+                artifactMatches: drawerArtifactMatches,
+                menuActions: menuActions,
+                onOpenAllArtifacts: { showAllArtifacts = true },
+                onNewChat: { handleNewChatRequest() },
+                onOpenSettings: { activeToolSheet = .settings },
+                onSearchChanged: { q in drawerQuery = q }
+            )
         } content: {
             stackLayout
         }
@@ -197,6 +229,57 @@ extension ContentView {
     /// 抽屉搜索是否生效。
     var drawerIsSearching: Bool {
         !drawerQuery.trimmingCharacters(in: .whitespaces).isEmpty
+    }
+
+    // MARK: - [R42] 抽屉搜索的两份匹配结果
+    //
+    // 抽屉是原版 SwiftUI 之后，搜索也得自己算 —— 以前这两件事是模板
+    // 里的 JS 做的（`searchHTML` / `renderFold`），现在模板不再参与渲染。
+    //
+    // 口径刻意和原版侧栏一致：会话按标题匹配、产物按文件名匹配，
+    // 命中处不高亮片段（`matchSnippet` 传 nil）。原版侧栏那套高亮是给
+    // `List` 的 AttributedString 用的，抽屉里行结构不同，硬套会错位；
+    // 而模板原来的做法本来也不高亮，只是把命中的行筛出来。
+
+    /// 命中的会话 id → 匹配到的文字（抽屉当前不显示片段，留着是给
+    /// `SessionDrawer` 的 `matchSnippet` 参数用的，暂时为 nil）。
+    var drawerSessionMatches: [String: String] {
+        let q = drawerQuery.trimmingCharacters(in: .whitespaces).lowercased()
+        guard !q.isEmpty else { return [:] }
+        var hit: [String: String] = [:]
+        for s in filteredSessions {
+            let title = s.title ?? ""
+            if title.lowercased().contains(q) {
+                hit[s.id] = title
+            }
+        }
+        return hit
+    }
+
+    /// 命中的产物。按文件名匹配，只取有归属会话的那些 ——
+    /// 没有 sessionId 的产物点进去无处可去。
+    var drawerArtifactMatches: [ArtifactMatch] {
+        let q = drawerQuery.trimmingCharacters(in: .whitespaces).lowercased()
+        guard !q.isEmpty else { return [] }
+
+        // 会话标题用一次字典，避免每条产物都去 sessions 里线性找一遍。
+        var titleById: [String: String] = [:]
+        for s in sessions {
+            titleById[s.id] = (s.title?.isEmpty == false) ? s.title! : "新对话"
+        }
+
+        var out: [ArtifactMatch] = []
+        for g in ArtifactStore.shared.groups {
+            let sessionTitle = titleById[g.id] ?? "新对话"
+            for item in g.items where item.name.lowercased().contains(q) {
+                out.append(ArtifactMatch(id: item.id,
+                                         sessionId: g.id,
+                                         sessionTitle: sessionTitle,
+                                         name: item.name,
+                                         kind: item.kind))
+            }
+        }
+        return out
     }
 
     /// 从「全部产物」页点「在对话中定位」时，切到目标会话。

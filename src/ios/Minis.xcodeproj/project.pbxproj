@@ -235,6 +235,8 @@
 		E5CSSPL022B /* ChatStore+SyncRemoteRecords.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5CSSPL022R /* ChatStore+SyncRemoteRecords.swift */; };
 		E5CSSPL023B /* ChatStore+BackupRestore.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5CSSPL023R /* ChatStore+BackupRestore.swift */; };
 		E5CVSET0000000000000A001 /* SettingsSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5CVSET0000000000000A011 /* SettingsSheet.swift */; };
+		E5DSGN00000000000004301 /* SpeakModeSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5DSGN00000000000004311 /* SpeakModeSettings.swift */; };
+		E5DSGN00000000000004201 /* SettingsDesignTokens.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5DSGN00000000000004211 /* SettingsDesignTokens.swift */; };
 		E5RENAM0000000000000B01 /* SettingsRename.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5RENAM0000000000000B11 /* SettingsRename.swift */; };
 		C40000000000000000000006 /* GitHubCloudBuildTool.swift in Sources */ = {isa = PBXBuildFile; fileRef = C40100000000000000000006 /* GitHubCloudBuildTool.swift */; };
 		C40000000000000000000001 /* GitHubAuth.swift in Sources */ = {isa = PBXBuildFile; fileRef = C40100000000000000000001 /* GitHubAuth.swift */; };
@@ -1037,6 +1039,8 @@
 		E5CSSPL022R /* ChatStore+SyncRemoteRecords.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ChatStore+SyncRemoteRecords.swift"; sourceTree = "<group>"; };
 		E5CSSPL023R /* ChatStore+BackupRestore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ChatStore+BackupRestore.swift"; sourceTree = "<group>"; };
 		E5CVSET0000000000000A011 /* SettingsSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsSheet.swift; sourceTree = "<group>"; };
+		E5DSGN00000000000004311 /* SpeakModeSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeakModeSettings.swift; sourceTree = "<group>"; };
+		E5DSGN00000000000004211 /* SettingsDesignTokens.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsDesignTokens.swift; sourceTree = "<group>"; };
 		E5RENAM0000000000000B11 /* SettingsRename.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsRename.swift; sourceTree = "<group>"; };
 		C40100000000000000000006 /* GitHubCloudBuildTool.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubCloudBuildTool.swift; sourceTree = "<group>"; };
 		C40100000000000000000001 /* GitHubAuth.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubAuth.swift; sourceTree = "<group>"; };
@@ -2722,6 +2726,8 @@
 				E5SHV0104 /* MountDetailView.swift */,
 				E5SOUL102 /* SoulSettingsView.swift */,
 				E5CVSET0000000000000A011 /* SettingsSheet.swift */,
+				E5DSGN00000000000004311 /* SpeakModeSettings.swift */,
+				E5DSGN00000000000004211 /* SettingsDesignTokens.swift */,
 				E5RENAM0000000000000B11 /* SettingsRename.swift */,
 				E5SUPD0000000000000A011 /* SelfUpdate.swift */,
 				E5SUPD0000000000000A012 /* SelfUpdateSection.swift */,
@@ -3622,6 +3628,8 @@
 				E5SOUL001 /* SoulStore.swift in Sources */,
 				E5SOUL002 /* SoulSettingsView.swift in Sources */,
 				E5CVSET0000000000000A001 /* SettingsSheet.swift in Sources */,
+				E5DSGN00000000000004301 /* SpeakModeSettings.swift in Sources */,
+				E5DSGN00000000000004201 /* SettingsDesignTokens.swift in Sources */,
 				E5RENAM0000000000000B01 /* SettingsRename.swift in Sources */,
 				E5SUPD0000000000000A001 /* SelfUpdate.swift in Sources */,
 				E5SUPD0000000000000A002 /* SelfUpdateSection.swift in Sources */,
@@ -4272,7 +4280,7 @@
 				DEVELOPMENT_TEAM = "";
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = ShareExtension/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = "Share to Minis";
+				INFOPLIST_KEY_CFBundleDisplayName = "分享到全能AI";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -4299,7 +4307,7 @@
 				DEVELOPMENT_TEAM = "";
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = ShareExtension/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = "Share to Minis";
+				INFOPLIST_KEY_CFBundleDisplayName = "分享到全能AI";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -4326,7 +4334,7 @@
 				DEVELOPMENT_TEAM = "";
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = FileProvider/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = "Minis Files";
+				INFOPLIST_KEY_CFBundleDisplayName = "全能AI 文件";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -4353,7 +4361,7 @@
 				DEVELOPMENT_TEAM = "";
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = FileProvider/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = "Minis Files";
+				INFOPLIST_KEY_CFBundleDisplayName = "全能AI 文件";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
 				LD_RUNPATH_SEARCH_PATHS = (

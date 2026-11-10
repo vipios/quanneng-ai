@@ -108,6 +108,8 @@ struct SkillsManagementView: View {
             }
         }
         .navigationTitle("Skills")
+        // [R42-统一外观] 和设置首页同一套底色 / 紧致标题。
+        .settingsPageChrome()
         .searchable(text: $searchQuery, placement: .navigationBarDrawer(displayMode: .always),
                     prompt: Text(AppLocalized("Search skills")))
         .onAppear { store.reload() }
@@ -145,7 +147,7 @@ struct SkillsManagementView: View {
                     Button {
                         showSkillsBrowser = true
                     } label: {
-                        Label(AppLocalized("Minis Skills"), systemImage: "globe")
+                        Label(AppLocalized("全能AI Skills"), systemImage: "globe")
                     }
                     // Skill iCloud sync is wired through SyncV2; hide the
                     // force-sync entry entirely when the user has the
@@ -986,7 +988,7 @@ struct MinisSkillsBrowserView: View {
                     .animation(.spring(response: 0.3), value: coordinator.hudState)
                 }
             }
-            .navigationTitle("Minis Skills")
+            .navigationTitle("全能AI Skills")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {

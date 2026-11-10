@@ -15,9 +15,31 @@
 //  第三件事不是删除而是改造：「检查更新」点下去现在会
 //  自动测速 → 挑最快的线路 → 自动下载，不再停在「发现新版本」。
 //  进度和结果都落在原来那个徽标的位置上，不新增一行。
+//
+//  ============================================================
+//  [R44-下载完弹分享] 用户 2026-11-10 21:44 的原话：
+//  「下载完更新文件后要出来弹窗，弹窗里面有苹果共享的那个界面，
+//    可以分享到任意 app」
+//
+//  原来的做法是下载完只在列表里多出一行「安装已下载的包」，点它弹一个
+//  **纯文字说明**（「文件在 文件 App → 全能AI → Updates 里…」）。
+//  等于让用户自己去找文件、自己想办法打开 —— 这一步本来就是多余的。
+//
+//  现在：下完之后自动弹系统共享面板（UIActivityViewController），
+//  里面就是 iOS 那套「共享到任意 App」：TrollStore、全能签、文件、
+//  AirDrop、微信……用户点哪个就是哪个。
+//
+//  ⚠️ 两处刻意不用的东西：
+//   ① 不用 `MinisShareSheet`。它为了绕开 Catalyst 的一个 ShareKit 崩溃，
+//      会把「扩展名解析不出 UTI」的文件**复制成 .bin** 再分享。
+//      .ipa 正好就是解析不出的那一类 —— 复制成 .bin 之后 TrollStore /
+//      全能签都认不出来了，分享等于白做。这里直接给原文件。
+//   ② 不做「先弹个确认框再弹分享」。用户要的就是「下载完 → 弹出来」，
+//      中间再插一层是把动作推回去一次。
 //  ============================================================
 
 import SwiftUI
+import UIKit
 
 struct SelfUpdateSection: View {
 
@@ -28,50 +50,63 @@ struct SelfUpdateSection: View {
     @State private var progress: Double = 0
     @State private var totalBytes: Int64 = 0
     @State private var savedFile: URL?
-    @State private var showInstallHint = false
+    /// [R44] 下完之后要弹的系统共享面板。非 nil 就 present。
+    ///
+    /// 用 `.sheet(item:)` 而不是 `.sheet(isPresented:)` + 另一个 @State：
+    /// 那样在「置 nil 关闭」和「置 URL 打开」之间会有一次
+    /// nil → nil 的中间态，快速连点两次会闪一下。item 只有一个真值源。
+    @State private var shareItem: ShareItem?
 
     var body: some View {
-        Section {
+        // [R42-换皮] 从 `Section` 改成纯 VStack。
+        //
+        // 原来这个视图是塞在 `List { Section { ... } }` 里的：分组标题由
+        // Section 的 header 画，行间分隔线由 List 画。现在设置页整体
+        // 换成了设计稿的卡片样式（ScrollView + 自绘卡片），List 那套
+        // chrome 不存在了 —— `Section` 在 ScrollView 里只会渲染成一个
+        // 带系统标题的块，行间也没有分隔线，看起来像散架。
+        //
+        // 所以这里自己排：两行 + 分隔线 + 结果文字，外层由 SettingsSheet
+        // 的 `card {}` 提供白底和圆角。功能一行没动。
+        VStack(spacing: 0) {
             // ── 版本 ──
             // 副标题也一并去掉：用户要求这一组不许有小字。
             // 版本号本身已经说明一切，再写「自有版本线」只是噪音。
-            HStack {
-                Label {
-                    SettingsRowLabel(.version, fallback: "版本")
-                } icon: {
-                    Image(systemName: "shippingbox")
-                        .font(.system(size: 9))
-                        .foregroundStyle(.white)
-                        .frame(width: 21, height: 21)
-                        .background(.indigo, in: Circle())
-                }
-                Spacer()
+            SettingsRowContent(
+                title: AnyView(SettingsRowLabel(.version, fallback: "版本")),
+                symbol: "shippingbox.fill",
+                iconTint: SettingsDesign.indigo
+            )
+            .overlay(alignment: .trailing) {
                 Text(SelfUpdate.displayVersion)
-                    .font(.system(.subheadline, design: .monospaced))
-                    .foregroundStyle(.secondary)
+                    .font(.system(size: 17, design: .monospaced))
+                    .foregroundStyle(Color(.secondaryLabel))
+                    // 行尾右侧留出 16 的边距（设计稿 .row-val 就是贴在
+                    // 行内右边 16 上）。不用 HStack 的 Spacer 是因为
+                    // SettingsRowContent 已经占满整行宽度。
+                    .padding(.trailing, SettingsDesign.rowPaddingH)
             }
             .settingsRowRenameable(.version,
                                    defaultName: AppLocalized("版本"))
+
+            divider
 
             // ── 检查更新 ──
             // 点一下就把整条流程跑完：测速 → 比版本 → 有新版就下载。
             Button {
                 Task { await runCheckAndDownload() }
             } label: {
-                HStack {
-                    Label {
-                        SettingsRowLabel(.checkUpdate, fallback: "检查更新")
-                    } icon: {
-                        Image(systemName: "arrow.triangle.2.circlepath")
-                            .font(.system(size: 9))
-                            .foregroundStyle(.white)
-                            .frame(width: 21, height: 21)
-                            .background(.green, in: Circle())
-                    }
-                    Spacer()
+                SettingsRowContent(
+                    title: AnyView(SettingsRowLabel(.checkUpdate, fallback: "检查更新")),
+                    symbol: "arrow.triangle.2.circlepath",
+                    iconTint: SettingsDesign.green
+                )
+                .overlay(alignment: .trailing) {
                     trailingStatus
+                        .padding(.trailing, SettingsDesign.rowPaddingH)
                 }
             }
+            .buttonStyle(.plain)
             .foregroundStyle(.primary)
             .disabled(checking || downloading)
             .settingsRowRenameable(.checkUpdate,
@@ -81,45 +116,68 @@ struct SelfUpdateSection: View {
             // 常驻一行「点上面检查」是多余的，那一行标题已经写清楚了。
             if !checking && !downloading, let r = result {
                 Text(r.message)
-                    .font(.caption)
+                    .font(SettingsDesign.subFont)
                     .foregroundStyle(color(for: r))
                     .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.leading, SettingsDesign.separatorInset)
+                    .padding(.trailing, SettingsDesign.rowPaddingH)
+                    .padding(.bottom, 10)
             }
 
-            // 下载完成后给一个安装入口。
+            // 下载完成后还留一个入口，方便「关掉分享面板之后又想分享」。
             //
-            // 为什么不自动装：iOS 的应用安装必须经过系统确认，
-            // App 自己不能静默替换自己（TrollStore 环境也一样，
-            // 它需要用户点一下）。所以这里只负责把包装好、把入口摆出来。
+            // 为什么不自动装：iOS 的应用安装必须经过系统确认，App 自己
+            // 不能静默替换自己（TrollStore 环境也一样，得用户点一下）。
+            // 所以这里做的是「把包递到用户手上」—— 点开就是系统共享面板，
+            // 选 TrollStore / 全能签 就装了。上一版这里是弹一段纯文字
+            // 告诉用户「自己去文件 App 找」，那等于把活推回去。
             if let f = savedFile {
+                divider
                 Button {
-                    showInstallHint = true
+                    shareItem = ShareItem(url: f)
                 } label: {
-                    HStack {
-                        Image(systemName: "square.and.arrow.down.on.square")
-                            .foregroundColor(.blue)
-                        Text("安装已下载的包")
-                        Spacer()
-                        Text(f.lastPathComponent)
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
+                    HStack(spacing: SettingsDesign.rowGap) {
+                        Image(systemName: "square.and.arrow.up")
+                            .font(.system(size: SettingsDesign.iconGlyph, weight: .medium))
+                            .foregroundStyle(.white)
+                            .frame(width: SettingsDesign.iconSize,
+                                   height: SettingsDesign.iconSize)
+                            .background(SettingsDesign.blue,
+                                        in: RoundedRectangle(cornerRadius: SettingsDesign.iconRadius,
+                                                             style: .continuous))
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("分享 / 安装这个包")
+                                .font(SettingsDesign.titleFont)
+                                .foregroundStyle(Color(.label))
+                            Text(f.lastPathComponent)
+                                .font(SettingsDesign.subFont)
+                                .foregroundStyle(Color(.secondaryLabel))
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
+                        Spacer(minLength: 0)
                     }
+                    .padding(.horizontal, SettingsDesign.rowPaddingH)
+                    .padding(.vertical, SettingsDesign.rowPaddingV)
+                    .frame(minHeight: SettingsDesign.rowMinHeight, alignment: .leading)
+                    .contentShape(Rectangle())
                 }
-                .alert("包已经下好了", isPresented: $showInstallHint) {
-                    Button("好", role: .cancel) {}
-                } message: {
-                    Text("文件在「文件」App → 全能AI → Updates 里。用 TrollStore 或全能签打开它就能装上。")
-                }
+                .buttonStyle(.plain)
             }
-        } header: {
-            Text("版本和更新")
-        } footer: {
-            // [R40] 原来这里有两套文案（配了 / 没配更新源）。
-            // 现在没有「配没配」这回事，只说一件事：包从哪来。
-            Text("更新包从 \(SelfUpdate.builtinRepo) 的 release 取，会自动挑当前最快的线路下载。")
         }
+        // [R44] 下完自动弹系统共享面板。系统那套「共享到任意 App」，
+        // 不自己造轮子、不筛应用列表。
+        .sheet(item: $shareItem) { item in
+            IPAShareSheet(url: item.url)
+        }
+    }
+
+    /// 行间分隔线。缩进对齐文字开头（设计稿 `left:56px`）。
+    private var divider: some View {
+        Rectangle()
+            .fill(Color(.separator))
+            .frame(height: 0.5)
+            .padding(.leading, SettingsDesign.separatorInset)
     }
 
     // MARK: - 右侧状态
@@ -228,6 +286,9 @@ struct SelfUpdateSection: View {
                 }
             }
             savedFile = file
+            // [R44] 下完立刻弹共享面板。用户原话「下载完更新文件后要出来
+            // 弹窗，弹窗里面有苹果共享的那个界面」—— 不是「在列表里多一行」。
+            shareItem = ShareItem(url: file)
         } catch {
             // 失败不把 result 打回「有新版」—— 那会让人以为没下载成功是错觉。
             result = .failed(reason: (error as? SelfUpdateError)?.errorDescription
@@ -236,4 +297,50 @@ struct SelfUpdateSection: View {
 
         downloading = false
     }
+}
+
+// MARK: - [R44] 共享面板
+
+/// `.sheet(item:)` 需要 Identifiable。包一层是为了让「同一个文件再弹一次」
+/// 也算新 item —— 直接拿 URL 当 id 的话，用户在列表里再点一次
+/// 「分享 / 安装」不会弹（id 没变，SwiftUI 认为还是同一个 sheet）。
+///
+/// ⚠️ `id` 必须是一个**存下来的**常量，不能写成 `Date().timeIntervalSince1970`
+/// 那种计算属性：SwiftUI 每次重算 body 都会读一次 id，每次都不同的话
+/// 它会认为 item 一直在变，反复 dismiss / present 同一张 sheet。
+private struct ShareItem: Identifiable {
+    let url: URL
+    let id: String
+
+    init(url: URL) {
+        self.url = url
+        self.id = url.path + "#" + UUID().uuidString
+    }
+}
+
+/// 就是系统那套共享面板，什么都不筛。
+///
+/// 为什么不复用 `MinisShareSheet`：见文件头的说明 —— 它会在扩展名
+/// 解析不出 UTI 时把文件**复制成 .bin**。`.ipa` 正好落在那条分支上，
+/// 复制完 TrollStore / 全能签都认不出来。这里直接用原文件。
+private struct IPAShareSheet: UIViewControllerRepresentable {
+
+    let url: URL
+
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        let vc = UIActivityViewController(activityItems: [url],
+                                          applicationActivities: nil)
+        // iPad 上不设 popover 锚点会直接崩（NSInvalidArgumentException）。
+        // 本 App 主目标只有 iPhone，但设置页在 iPad 分栏下也可能被点到，
+        // 所以两句都要有。sourceView 用一个零尺寸视图即可。
+        if let pop = vc.popoverPresentationController {
+            let anchor = UIView(frame: .zero)
+            pop.sourceView = anchor
+            pop.sourceRect = CGRect(x: 0, y: 0, width: 1, height: 1)
+            pop.permittedArrowDirections = []
+        }
+        return vc
+    }
+
+    func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
 }

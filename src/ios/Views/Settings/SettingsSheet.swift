@@ -51,415 +51,30 @@ struct SettingsSheet: View {
 
     var body: some View {
         NavigationStack(path: $navPath) {
-            List {
-                Section {
-                    NavigationLink {
-                        ProviderInstancesView()
-                    } label: {
-                        Label {
-                            SettingsRowLabel(.providers, fallback: "Manage Providers")
-                        } icon: {
-                            if #available(iOS 26, *) {
-                                Image(systemName: "key.circle.fill")
-                            } else {
-                                Image(systemName: "lock.circle.fill")
-                            }
-                        }
-                    }
-                    // 长按改名。defaultName 传解析后的字符串 —— 弹窗里
-                    // 「原名」那行要显示「AI 服务商」而不是 key 原文。
-                    .settingsRowRenameable(.providers,
-                                           defaultName: AppLocalized("Manage Providers"))
-
-                    NavigationLink {
-                        ModelGroupsView()
-                    } label: {
-                        Label {
-                            SettingsRowLabel(.modelGroups, fallback: "Model Groups")
-                        } icon: {
-                            Image(systemName: "gearshape.circle.fill")
-                        }
-                    }
-                    .settingsRowRenameable(.modelGroups,
-                                           defaultName: AppLocalized("Model Groups"))
-
-                    NavigationLink {
-                        UsageStatsView()
-                    } label: {
-                        Label {
-                            SettingsRowLabel(.tokenUsage, fallback: "Token Usage")
-                        } icon: {
-                            Image(systemName: "chart.line.uptrend.xyaxis.circle.fill")
-                        }
-                    }
-                    .settingsRowRenameable(.tokenUsage,
-                                           defaultName: AppLocalized("Token Usage"))
-                } header: {
-                    Text("LLM Providers")
+            // [R42-换皮] 这一版只换外观，功能一行没动。
+            //
+            // 原来的 `List` 用的是系统 chrome：分组标题是小号灰字、
+            // 行高由系统决定、图标 21pt 圆形。设计稿是另一套度量 ——
+            // 图标 29×29 圆角 7.5、行最小 52、标题 17pt、分组标题
+            // 13pt/600 且用黑色、卡片圆角 14、左右边距 16。
+            //
+            // 换成 ScrollView + 自己排的卡片之后，那些数值才落得下来
+            // （List 的 row inset / separator inset 是系统接管的，改不干净）。
+            // 所有跳转仍然是原来的 `NavigationLink`，目标页面一个没换。
+            ScrollView {
+                VStack(spacing: 0) {
+                    providersSection
+                    deviceSection
+                    appearanceSection
+                    agentSection
+                    storageSection
+                    permissionsSection
+                    logsSection
+                    selfUpdateSection
                 }
-
-                // [T-minis-relay] 设备管理：在「外观」**上方**。
-                // 这两个入口是「运维」性质，和外观（个性化）不是一类，
-                // 放上面也符合「常用在上面」的习惯。
-                Section {
-                    NavigationLink {
-                        RelayAdminView()
-                    } label: {
-                        Label {
-                            SettingsRowLabel(.relayAdmin, fallback: "中转站后台")
-                        } icon: {
-                            Image(systemName: "server.rack")
-                                .font(.system(size: 9))
-                                .foregroundStyle(.white)
-                                .frame(width: 21, height: 21)
-                                .background(.blue, in: Circle())
-                        }
-                    }
-                    .settingsRowRenameable(.relayAdmin,
-                                           defaultName: AppLocalized("中转站后台"))
-
-                    NavigationLink {
-                        RelayRouterView()
-                    } label: {
-                        Label {
-                            SettingsRowLabel(.relayRouter, fallback: "路由器后台")
-                        } icon: {
-                            Image(systemName: "wifi.router.fill")
-                                .font(.system(size: 9))
-                                .foregroundStyle(.white)
-                                .frame(width: 21, height: 21)
-                                .background(.green, in: Circle())
-                        }
-                    }
-                    .settingsRowRenameable(.relayRouter,
-                                           defaultName: AppLocalized("路由器后台"))
-                } header: {
-                    Text("设备管理")
-                }
-                // footer 去掉了：说明文字在真机上占两行，用户明确要求
-                // 这一块只留条目，不要小字。
-
-                Section("Appearance") {
-                    NavigationLink {
-                        AppearanceSettingsView()
-                    } label: {
-                        Label {
-                            SettingsRowLabel(.appearance, fallback: "Appearance")
-                        } icon: {
-                            Image(systemName: "paintbrush.fill")
-                                .font(.system(size: 9))
-                                .foregroundStyle(.white)
-                                .frame(width: 21, height: 21)
-                                .background(.indigo, in: Circle())
-                        }
-                    }
-                    .settingsRowRenameable(.appearance,
-                                           defaultName: AppLocalized("Appearance"))
-                }
-
-                Section("Agent Runtime") {
-                    // [T-tools-granular-switches] First row: per-tool switches.
-                    NavigationLink {
-                        ToolsSettingsView()
-                    } label: {
-                        Label {
-                            SettingsRowLabel(.agentTools, fallback: "Agent Tools")
-                        } icon: {
-                            Image(systemName: "wrench.and.screwdriver.fill")
-                                .font(.system(size: 9))
-                                .foregroundStyle(.white)
-                                .frame(width: 21, height: 21)
-                                .background(.indigo, in: Circle())
-                        }
-                    }
-                    .settingsRowRenameable(.agentTools,
-                                           defaultName: AppLocalized("Agent Tools"))
-                    // [T-sub-agents-v1] Directly under Agent Tools: the two pages
-                    // are the tool surface (which tools exist) and the delegation
-                    // surface (who runs a delegated task), so they read as a pair.
-                    NavigationLink {
-                        HelperSettingsView()
-                    } label: {
-                        Label {
-                            SettingsRowLabel(.subAgents, fallback: "Sub Agents")
-                        } icon: {
-                            // [T-agent-icon] Same violet and glyph the agent block
-                            // and tool sheet use in chat, so the settings row reads
-                            // as the same feature. `glyph` is the bare figure pair
-                            // meant for a caller that already draws the disc — the
-                            // wider person.2.wave.2 reached the edge of the 21pt
-                            // circle at this section's icon size.
-                            Image(systemName: HelperAccent.glyph)
-                                .font(.system(size: 9))
-                                .foregroundStyle(.white)
-                                .frame(width: 21, height: 21)
-                                .background(HelperAccent.color, in: Circle())
-                        }
-                    }
-                    .settingsRowRenameable(.subAgents,
-                                           defaultName: AppLocalized("Sub Agents"))
-                    NavigationLink {
-                        SkillsManagementView()
-                    } label: {
-                        Label {
-                            SettingsRowLabel(.skills, fallback: "Skills")
-                        } icon: {
-                            Image(systemName: "puzzlepiece.extension")
-                                .font(.system(size: 9))
-                                .foregroundStyle(.white)
-                                .frame(width: 21, height: 21)
-                                .background(.blue, in: Circle())
-                        }
-                    }
-                    .settingsRowRenameable(.skills,
-                                           defaultName: AppLocalized("Skills"))
-                    // [R33-说话模式] 自动判定会按能力域给一个默认说话模式
-                    // （逆向域→逆向专家、Web 域→安全研究）。这一行让用户
-                    // 把它固定下来，也可以留在「自动」不管。
-                    NavigationLink {
-                        SpeakingModesView()
-                    } label: {
-                        Label {
-                            SettingsRowLabel(.speakingMode, fallback: "说话模式")
-                        } icon: {
-                            Image(systemName: "waveform")
-                                .font(.system(size: 9))
-                                .foregroundStyle(.white)
-                                .frame(width: 21, height: 21)
-                                .background(.orange, in: Circle())
-                        }
-                    }
-                    .settingsRowRenameable(.speakingMode,
-                                           defaultName: AppLocalized("说话模式"))
-                    NavigationLink {
-                        SoulSettingsView()
-                    } label: {
-                        Label {
-                            SettingsRowLabel(.soul, fallback: "Soul")
-                        } icon: {
-                            Image(systemName: "sparkles")
-                                .font(.system(size: 11))
-                                .foregroundStyle(.white)
-                                .frame(width: 21, height: 21)
-                                .background(.pink, in: Circle())
-                        }
-                    }
-                    .settingsRowRenameable(.soul,
-                                           defaultName: AppLocalized("Soul"))
-                    NavigationLink {
-                        MemoryManagementView()
-                    } label: {
-                        Label {
-                            SettingsRowLabel(.memory, fallback: "Memory")
-                        } icon: {
-                            Image(systemName: "brain.head.profile")
-                                .font(.system(size: 9))
-                                .foregroundStyle(.white)
-                                .frame(width: 21, height: 21)
-                                .background(.purple, in: Circle())
-                        }
-                    }
-                    .settingsRowRenameable(.memory,
-                                           defaultName: AppLocalized("Memory"))
-                    NavigationLink {
-                        MCPIntegrationsView()
-                    } label: {
-                        Label {
-                            SettingsRowLabel(.mcpIntegrations, fallback: "MCP Integrations")
-                        } icon: {
-                            Image(systemName: "square.stack.3d.up")
-                                .font(.system(size: 9))
-                                .foregroundStyle(.white)
-                                .frame(width: 21, height: 21)
-                                .background(.teal, in: Circle())
-                        }
-                    }
-                    .settingsRowRenameable(.mcpIntegrations,
-                                           defaultName: AppLocalized("MCP Integrations"))
-                    NavigationLink {
-                        EnvironmentVariablesView()
-                    } label: {
-                        Label {
-                            SettingsRowLabel(.environmentVars, fallback: "Environment Variables")
-                        } icon: {
-                            Image(systemName: "terminal")
-                                .font(.system(size: 9))
-                                .foregroundStyle(.white)
-                                .frame(width: 21, height: 21)
-                                .background(.green, in: Circle())
-                        }
-                    }
-                    .settingsRowRenameable(.environmentVars,
-                                           defaultName: AppLocalized("Environment Variables"))
-                }
-
-                Section("Storage") {
-                    NavigationLink {
-                        StorageManagementView()
-                    } label: {
-                        Label {
-                            SettingsRowLabel(.storage, fallback: "Storage")
-                        } icon: {
-                            Image(systemName: "archivebox")
-                                .font(.system(size: 9))
-                                .foregroundStyle(.white)
-                                .frame(width: 21, height: 21)
-                                .background(.blue, in: Circle())
-                        }
-                    }
-                    .settingsRowRenameable(.storage,
-                                           defaultName: AppLocalized("Storage"))
-                    NavigationLink {
-                        SharedFoldersSettingsView()
-                    } label: {
-                        Label {
-                            SettingsRowLabel(.sharedFolders, fallback: "Shared Folders")
-                        } icon: {
-                            Image(systemName: "folder.fill.badge.person.crop")
-                                .font(.system(size: 9))
-                                .foregroundStyle(.white)
-                                .frame(width: 21, height: 21)
-                                .background(.green, in: Circle())
-                        }
-                    }
-                    .settingsRowRenameable(.sharedFolders,
-                                           defaultName: AppLocalized("Shared Folders"))
-                    NavigationLink {
-                        MountedFoldersSettingsView()
-                    } label: {
-                        Label {
-                            SettingsRowLabel(.mountedFolders, fallback: "Mount External Folders")
-                        } icon: {
-                            Image(systemName: "externaldrive.badge.plus")
-                                .font(.system(size: 9))
-                                .foregroundStyle(.white)
-                                .frame(width: 21, height: 21)
-                                .background(.orange, in: Circle())
-                        }
-                    }
-                    .settingsRowRenameable(.mountedFolders,
-                                           defaultName: AppLocalized("Mount External Folders"))
-                    if #available(iOS 17.0, *) {
-                        NavigationLink {
-                            // v2 is the default sync engine; legacy v1
-                            // settings page is unreachable from here.
-                            CloudSyncSettingsV2View()
-                        } label: {
-                            Label {
-                                SettingsRowLabel(.iCloudSync, fallback: "iCloud Sync")
-                            } icon: {
-                                Image(systemName: "icloud")
-                                    .font(.system(size: 9))
-                                    .foregroundStyle(.white)
-                                    .frame(width: 21, height: 21)
-                                    .background(.cyan, in: Circle())
-                            }
-                        }
-                        .settingsRowRenameable(.iCloudSync,
-                                               defaultName: AppLocalized("iCloud Sync"))
-                    }
-                    NavigationLink {
-                        BackupAndRestoreView()
-                    } label: {
-                        Label {
-                            // Not just "Backup": this screen is both halves of
-                            // the feature, and on a new device restore is the
-                            // only one the user is looking for.
-                            SettingsRowLabel(.backupRestore, fallback: "Backup & Restore")
-                        } icon: {
-                            // arrow.triangle.2.circlepath reads as a round trip
-                            // rather than a one-way export.
-                            Image(systemName: "arrow.triangle.2.circlepath")
-                                .font(.system(size: 9))
-                                .foregroundStyle(.white)
-                                .frame(width: 21, height: 21)
-                                .background(.indigo, in: Circle())
-                        }
-                    }
-                    .settingsRowRenameable(.backupRestore,
-                                           defaultName: AppLocalized("Backup & Restore"))
-
-                    // [T-minis-gh-fallback] GitHub 账号 + 云端编译兜底。
-                    //
-                    // 放在「存储」分组的最下面 —— 它确实和存储是同一类事
-                    // （把东西放到本机之外），但又不是用户天天点的，
-                    // 所以排在本机存储相关项之后。
-                    NavigationLink {
-                        GitHubAccountView()
-                    } label: {
-                        Label {
-                            SettingsRowLabel(.githubAccount, fallback: "GitHub 账号")
-                        } icon: {
-                            Image(systemName: "chevron.left.forwardslash.chevron.right")
-                                .font(.system(size: 9))
-                                .foregroundStyle(.white)
-                                .frame(width: 21, height: 21)
-                                .background(.black, in: Circle())
-                        }
-                    }
-                    .settingsRowRenameable(.githubAccount,
-                                           defaultName: AppLocalized("GitHub 账号"))
-                }
-
-                Section("Permissions") {
-                    NavigationLink {
-                        OffloadPermissionSettingsView()
-                    } label: {
-                        Label {
-                            SettingsRowLabel(.permissions, fallback: "Permissions")
-                        } icon: {
-                            Image(systemName: "lock.shield")
-                                .font(.system(size: 9))
-                                .foregroundStyle(.white)
-                                .frame(width: 21, height: 21)
-                                .background(.red, in: Circle())
-                        }
-                    }
-                    .settingsRowRenameable(.permissions,
-                                           defaultName: AppLocalized("Permissions"))
-                    if BiometricAuth.isAvailable {
-                        NavigationLink {
-                            FaceIDProtectionSettingsView()
-                        } label: {
-                            Label {
-                                SettingsRowLabel(.faceID,
-                                                 fallback: "\(BiometricAuth.biometryDisplayName) Protection")
-                            } icon: {
-                                // Match SF Symbol to the device's actual sensor — Touch ID
-                                // devices showed a Face ID glyph here before.
-                                Image(systemName: BiometricAuth.biometryIconName)
-                                    .font(.system(size: 11))
-                                    .foregroundStyle(.white)
-                                    .frame(width: 21, height: 21)
-                                    .background(.teal, in: Circle())
-                            }
-                        }
-                        .settingsRowRenameable(
-                            .faceID,
-                            defaultName: "\(BiometricAuth.biometryDisplayName) \(AppLocalized("Protection"))")
-                    }
-                }
-
-                Section("Logs") {
-                    NavigationLink {
-                        LogManagementView()
-                    } label: {
-                        Label {
-                            SettingsRowLabel(.logs, fallback: "Logs")
-                        } icon: {
-                            Image(systemName: "doc.text")
-                                .font(.system(size: 9))
-                                .foregroundStyle(.white)
-                                .frame(width: 21, height: 21)
-                                .background(.gray, in: Circle())
-                        }
-                    }
-                    .settingsRowRenameable(.logs,
-                                           defaultName: AppLocalized("Logs"))
-                }
-
-                SelfUpdateSection()
+                .padding(.bottom, SettingsDesign.listBottomPadding)
             }
+            .background(Color(.systemGroupedBackground))
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -468,60 +83,7 @@ struct SettingsSheet: View {
                 }
             }
             .navigationDestination(for: SettingsDestination.self) { dest in
-                switch dest {
-                case .providers:
-                    ProviderInstancesView()
-                case .providerDetail(let id):
-                    ProviderInstanceDetailView(instanceId: id)
-                case .modelGroups:
-                    ModelGroupsView()
-                case .modelGroupDetail(let id):
-                    ModelGroupDetailView(groupId: id)
-                case .usage:
-                    UsageStatsView()
-                case .skills:
-                    SkillsManagementView()
-                case .soul:
-                    SoulSettingsView()
-                case .tools:
-                    ToolsSettingsView()
-                case .memory:
-                    MemoryManagementView()
-                case .storage:
-                    StorageManagementView()
-                case .mountedFolders:
-                    MountedFoldersSettingsView()
-                case .sharedFolders:
-                    SharedFoldersSettingsView()
-                case .logs:
-                    // Pull a one-shot tab hint from the deep link router
-                    // (e.g. `?tab=config-audit`). LogManagementView clears
-                    // its local state independently; the published value
-                    // here is consumed once and reset to nil.
-                    LogManagementView(initialTab: deepLink.pendingLogsTab ?? "logs")
-                        .onAppear { deepLink.pendingLogsTab = nil }
-                case .relayAdmin:
-                    RelayAdminView()
-                case .relayRouter:
-                    RelayRouterView()
-                case .appearance:
-                    AppearanceSettingsView()
-                case .background:
-                    EnhancedBackgroundSettingsView()
-                case .about:
-                    AboutView()
-                case .environments:
-                    EnvironmentVariablesView()
-                case .permissions:
-                    OffloadPermissionSettingsView()
-                // [T-mcp-oauth-deeplink] Detail = the list view told to open
-                // the server's edit sheet on appear; a deleted/unknown server
-                // just lands on the list (no crash, sensible fallback).
-                case .mcpIntegrations:
-                    MCPIntegrationsView()
-                case .mcpServerDetail(let serverId):
-                    MCPIntegrationsView(initialEditServerId: serverId)
-                }
+                destinationView(for: dest)
             }
             .onAppear {
                 applyPendingDeepLink()
@@ -558,6 +120,560 @@ struct SettingsSheet: View {
         .preferredColorScheme(appearanceMode == 1 ? .light : appearanceMode == 2 ? .dark : nil)
         .appFontScale()
     }
+
+    // MARK: - [R42] 分组（外观照设计稿，功能照原版）
+
+    /// 一个分组的标题。设计稿 `#stBody .grp-head`：13pt/600、黑色、
+    /// 左缩进 34、上 22 下 8。
+    private func groupHeader(_ text: String) -> some View {
+        Text(text)
+            .font(SettingsDesign.sectionHeaderFont)
+            // 设计稿这里用的是 --label（黑），不是系统 List header 的灰色。
+            // 这是「一眼像设计稿」最明显的一处差别。
+            .foregroundStyle(Color(.label))
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.leading, SettingsDesign.sectionHeaderLeading)
+            .padding(.trailing, SettingsDesign.cardInset)
+            .padding(.top, SettingsDesign.sectionHeaderTop)
+            .padding(.bottom, SettingsDesign.sectionHeaderBottom)
+    }
+
+    /// 卡片容器。设计稿 `#stBody .card`：白底、左右 16、圆角 14、裁切。
+    private func card<C: View>(@ViewBuilder _ content: () -> C) -> some View {
+        VStack(spacing: 0) {
+            content()
+        }
+        .background(Color(.secondarySystemGroupedBackground))
+        .clipShape(RoundedRectangle(cornerRadius: SettingsDesign.cardRadius,
+                                    style: .continuous))
+        .padding(.horizontal, SettingsDesign.cardInset)
+    }
+
+    /// 行与行之间的分隔线。
+    ///
+    /// 设计稿是 `left:56px`（对齐到文字开头），原版 List 的默认 inset 是 16，
+    /// 会和图标根部交叉。这里自己画，缩进精确可控。
+    private func rowDivider() -> some View {
+        Rectangle()
+            .fill(Color(.separator))
+            .frame(height: 0.5)
+            .padding(.leading, SettingsDesign.separatorInset)
+    }
+
+    // MARK: LLM Providers
+
+    private var providersSection: some View {
+        VStack(spacing: 0) {
+            groupHeader(AppLocalized("LLM Providers"))
+
+            card {
+                NavigationLink {
+                    ProviderInstancesView()
+                } label: {
+                    SettingsRowContent(
+                        title: AnyView(SettingsRowLabel(.providers,
+                                                        fallback: "Manage Providers")),
+                        symbol: "key.fill",
+                        iconTint: SettingsDesign.blue
+                    )
+                }
+                .buttonStyle(.plain)
+                .settingsRowRenameable(.providers,
+                                       defaultName: AppLocalized("Manage Providers"))
+
+                rowDivider()
+
+                NavigationLink {
+                    ModelGroupsView()
+                } label: {
+                    SettingsRowContent(
+                        title: AnyView(SettingsRowLabel(.modelGroups,
+                                                        fallback: "Model Groups")),
+                        symbol: "gearshape.fill",
+                        iconTint: SettingsDesign.gray
+                    )
+                }
+                .buttonStyle(.plain)
+                .settingsRowRenameable(.modelGroups,
+                                       defaultName: AppLocalized("Model Groups"))
+
+                rowDivider()
+
+                NavigationLink {
+                    UsageStatsView()
+                } label: {
+                    SettingsRowContent(
+                        title: AnyView(SettingsRowLabel(.tokenUsage,
+                                                        fallback: "Token Usage")),
+                        symbol: "chart.line.uptrend.xyaxis",
+                        iconTint: SettingsDesign.green
+                    )
+                }
+                .buttonStyle(.plain)
+                .settingsRowRenameable(.tokenUsage,
+                                       defaultName: AppLocalized("Token Usage"))
+            }
+        }
+    }
+
+    // MARK: 设备管理
+
+    private var deviceSection: some View {
+        VStack(spacing: 0) {
+            groupHeader(AppLocalized("设备管理"))
+
+            card {
+                NavigationLink {
+                    RelayAdminView()
+                } label: {
+                    SettingsRowContent(
+                        title: AnyView(SettingsRowLabel(.relayAdmin,
+                                                        fallback: "中转站后台")),
+                        symbol: "server.rack",
+                        iconTint: SettingsDesign.blue,
+                        // server.rack 在 17pt 下几乎看不见，单独放大。
+                        glyphScale: 1.25
+                    )
+                }
+                .buttonStyle(.plain)
+                .settingsRowRenameable(.relayAdmin,
+                                       defaultName: AppLocalized("中转站后台"))
+
+                rowDivider()
+
+                NavigationLink {
+                    RelayRouterView()
+                } label: {
+                    SettingsRowContent(
+                        title: AnyView(SettingsRowLabel(.relayRouter,
+                                                        fallback: "路由器后台")),
+                        symbol: "wifi.router.fill",
+                        iconTint: SettingsDesign.green,
+                        glyphScale: 1.1
+                    )
+                }
+                .buttonStyle(.plain)
+                .settingsRowRenameable(.relayRouter,
+                                       defaultName: AppLocalized("路由器后台"))
+            }
+        }
+    }
+
+    // MARK: Appearance
+
+    private var appearanceSection: some View {
+        VStack(spacing: 0) {
+            groupHeader(AppLocalized("Appearance"))
+
+            card {
+                NavigationLink {
+                    AppearanceSettingsView()
+                } label: {
+                    SettingsRowContent(
+                        title: AnyView(SettingsRowLabel(.appearance,
+                                                        fallback: "Appearance")),
+                        symbol: "paintbrush.fill",
+                        iconTint: SettingsDesign.indigo
+                    )
+                }
+                .buttonStyle(.plain)
+                .settingsRowRenameable(.appearance,
+                                       defaultName: AppLocalized("Appearance"))
+            }
+        }
+    }
+
+    // MARK: Agent Runtime
+
+    private var agentSection: some View {
+        VStack(spacing: 0) {
+            groupHeader(AppLocalized("Agent Runtime"))
+
+            card {
+                NavigationLink {
+                    ToolsSettingsView()
+                } label: {
+                    SettingsRowContent(
+                        title: AnyView(SettingsRowLabel(.agentTools,
+                                                        fallback: "Agent Tools")),
+                        symbol: "wrench.and.screwdriver.fill",
+                        iconTint: SettingsDesign.indigo
+                    )
+                }
+                .buttonStyle(.plain)
+                .settingsRowRenameable(.agentTools,
+                                       defaultName: AppLocalized("Agent Tools"))
+
+                rowDivider()
+
+                NavigationLink {
+                    HelperSettingsView()
+                } label: {
+                    SettingsRowContent(
+                        title: AnyView(SettingsRowLabel(.subAgents,
+                                                        fallback: "Sub Agents")),
+                        symbol: HelperAccent.glyph,
+                        iconTint: SettingsDesign.purple
+                    )
+                }
+                .buttonStyle(.plain)
+                .settingsRowRenameable(.subAgents,
+                                       defaultName: AppLocalized("Sub Agents"))
+
+                rowDivider()
+
+                NavigationLink {
+                    SkillsManagementView()
+                } label: {
+                    SettingsRowContent(
+                        title: AnyView(SettingsRowLabel(.skills,
+                                                        fallback: "Skills")),
+                        symbol: "puzzlepiece.extension.fill",
+                        iconTint: SettingsDesign.blue
+                    )
+                }
+                .buttonStyle(.plain)
+                .settingsRowRenameable(.skills,
+                                       defaultName: AppLocalized("Skills"))
+
+                rowDivider()
+
+                // [R42] 说话模式。位置对齐设计稿：技能之后、Soul 之前。
+                //
+                // 默认是「自动」—— 用户不点它也一直按内容自动判，
+                // 技能和人格本来就是自动的，这一项跟着三元组走。
+                NavigationLink {
+                    SpeakModeSettingsView()
+                } label: {
+                    SettingsRowContent(
+                        title: AnyView(SettingsRowLabel(.modes,
+                                                        fallback: "说话模式")),
+                        symbol: "text.bubble.fill",
+                        iconTint: SettingsDesign.orange,
+                        subtitle: "自动 · 随内容和技能、人格一起判"
+                    )
+                }
+                .buttonStyle(.plain)
+                .settingsRowRenameable(.modes,
+                                       defaultName: AppLocalized("说话模式"))
+
+                rowDivider()
+
+                NavigationLink {
+                    SoulSettingsView()
+                } label: {
+                    SettingsRowContent(
+                        title: AnyView(SettingsRowLabel(.soul,
+                                                        fallback: "Soul")),
+                        symbol: "sparkles",
+                        iconTint: SettingsDesign.pink
+                    )
+                }
+                .buttonStyle(.plain)
+                .settingsRowRenameable(.soul,
+                                       defaultName: AppLocalized("Soul"))
+
+                rowDivider()
+
+                NavigationLink {
+                    MemoryManagementView()
+                } label: {
+                    SettingsRowContent(
+                        title: AnyView(SettingsRowLabel(.memory,
+                                                        fallback: "Memory")),
+                        symbol: "brain.head.profile",
+                        iconTint: SettingsDesign.purple
+                    )
+                }
+                .buttonStyle(.plain)
+                .settingsRowRenameable(.memory,
+                                       defaultName: AppLocalized("Memory"))
+
+                rowDivider()
+
+                NavigationLink {
+                    MCPIntegrationsView()
+                } label: {
+                    SettingsRowContent(
+                        title: AnyView(SettingsRowLabel(.mcpIntegrations,
+                                                        fallback: "MCP Integrations")),
+                        symbol: "square.stack.3d.up.fill",
+                        iconTint: SettingsDesign.teal
+                    )
+                }
+                .buttonStyle(.plain)
+                .settingsRowRenameable(.mcpIntegrations,
+                                       defaultName: AppLocalized("MCP Integrations"))
+
+                rowDivider()
+
+                NavigationLink {
+                    EnvironmentVariablesView()
+                } label: {
+                    SettingsRowContent(
+                        title: AnyView(SettingsRowLabel(.environmentVars,
+                                                        fallback: "Environment Variables")),
+                        symbol: "terminal.fill",
+                        iconTint: SettingsDesign.black
+                    )
+                }
+                .buttonStyle(.plain)
+                .settingsRowRenameable(.environmentVars,
+                                       defaultName: AppLocalized("Environment Variables"))
+            }
+        }
+    }
+
+    // MARK: Storage
+
+    private var storageSection: some View {
+        VStack(spacing: 0) {
+            groupHeader(AppLocalized("Storage"))
+
+            card {
+                NavigationLink {
+                    StorageManagementView()
+                } label: {
+                    SettingsRowContent(
+                        title: AnyView(SettingsRowLabel(.storage,
+                                                        fallback: "Storage")),
+                        symbol: "archivebox.fill",
+                        iconTint: SettingsDesign.blue
+                    )
+                }
+                .buttonStyle(.plain)
+                .settingsRowRenameable(.storage,
+                                       defaultName: AppLocalized("Storage"))
+
+                rowDivider()
+
+                NavigationLink {
+                    SharedFoldersSettingsView()
+                } label: {
+                    SettingsRowContent(
+                        title: AnyView(SettingsRowLabel(.sharedFolders,
+                                                        fallback: "Shared Folders")),
+                        symbol: "folder.fill",
+                        iconTint: SettingsDesign.green
+                    )
+                }
+                .buttonStyle(.plain)
+                .settingsRowRenameable(.sharedFolders,
+                                       defaultName: AppLocalized("Shared Folders"))
+
+                rowDivider()
+
+                NavigationLink {
+                    MountedFoldersSettingsView()
+                } label: {
+                    SettingsRowContent(
+                        title: AnyView(SettingsRowLabel(.mountedFolders,
+                                                        fallback: "Mount External Folders")),
+                        symbol: "externaldrive.fill.badge.plus",
+                        iconTint: SettingsDesign.orange
+                    )
+                }
+                .buttonStyle(.plain)
+                .settingsRowRenameable(.mountedFolders,
+                                       defaultName: AppLocalized("Mount External Folders"))
+
+                if #available(iOS 17.0, *) {
+                    rowDivider()
+
+                    NavigationLink {
+                        // v2 is the default sync engine; legacy v1
+                        // settings page is unreachable from here.
+                        CloudSyncSettingsV2View()
+                    } label: {
+                        SettingsRowContent(
+                            title: AnyView(SettingsRowLabel(.iCloudSync,
+                                                            fallback: "iCloud Sync")),
+                            symbol: "icloud.fill",
+                            iconTint: SettingsDesign.cyan
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .settingsRowRenameable(.iCloudSync,
+                                           defaultName: AppLocalized("iCloud Sync"))
+                }
+
+                rowDivider()
+
+                NavigationLink {
+                    BackupAndRestoreView()
+                } label: {
+                    SettingsRowContent(
+                        title: AnyView(SettingsRowLabel(.backupRestore,
+                                                        fallback: "Backup & Restore")),
+                        symbol: "arrow.triangle.2.circlepath",
+                        iconTint: SettingsDesign.indigo
+                    )
+                }
+                .buttonStyle(.plain)
+                .settingsRowRenameable(.backupRestore,
+                                       defaultName: AppLocalized("Backup & Restore"))
+
+                rowDivider()
+
+                NavigationLink {
+                    GitHubAccountView()
+                } label: {
+                    SettingsRowContent(
+                        title: AnyView(SettingsRowLabel(.githubAccount,
+                                                        fallback: "GitHub 账号")),
+                        symbol: "chevron.left.forwardslash.chevron.right",
+                        iconTint: SettingsDesign.black
+                    )
+                }
+                .buttonStyle(.plain)
+                .settingsRowRenameable(.githubAccount,
+                                       defaultName: AppLocalized("GitHub 账号"))
+            }
+        }
+    }
+
+    // MARK: Permissions
+
+    private var permissionsSection: some View {
+        VStack(spacing: 0) {
+            groupHeader(AppLocalized("Permissions"))
+
+            card {
+                NavigationLink {
+                    OffloadPermissionSettingsView()
+                } label: {
+                    SettingsRowContent(
+                        title: AnyView(SettingsRowLabel(.permissions,
+                                                        fallback: "Permissions")),
+                        symbol: "lock.shield.fill",
+                        iconTint: SettingsDesign.red
+                    )
+                }
+                .buttonStyle(.plain)
+                .settingsRowRenameable(.permissions,
+                                       defaultName: AppLocalized("Permissions"))
+
+                if BiometricAuth.isAvailable {
+                    rowDivider()
+
+                    NavigationLink {
+                        FaceIDProtectionSettingsView()
+                    } label: {
+                        SettingsRowContent(
+                            title: AnyView(SettingsRowLabel(
+                                .faceID,
+                                fallback: "\(BiometricAuth.biometryDisplayName) Protection")),
+                            // Match SF Symbol to the device's actual sensor — Touch ID
+                            // devices showed a Face ID glyph here before.
+                            symbol: BiometricAuth.biometryIconName,
+                            iconTint: SettingsDesign.teal
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .settingsRowRenameable(
+                        .faceID,
+                        defaultName: "\(BiometricAuth.biometryDisplayName) \(AppLocalized("Protection"))")
+                }
+            }
+        }
+    }
+
+    // MARK: Logs
+
+    private var logsSection: some View {
+        VStack(spacing: 0) {
+            groupHeader(AppLocalized("Logs"))
+
+            card {
+                NavigationLink {
+                    LogManagementView(initialTab: deepLink.pendingLogsTab ?? "logs")
+                        .onAppear { deepLink.pendingLogsTab = nil }
+                } label: {
+                    SettingsRowContent(
+                        title: AnyView(SettingsRowLabel(.logs,
+                                                        fallback: "Logs")),
+                        symbol: "doc.text.fill",
+                        iconTint: SettingsDesign.gray
+                    )
+                }
+                .buttonStyle(.plain)
+                .settingsRowRenameable(.logs,
+                                       defaultName: AppLocalized("Logs"))
+            }
+        }
+    }
+
+    // MARK: 版本和更新
+
+    private var selfUpdateSection: some View {
+        VStack(spacing: 0) {
+            groupHeader(AppLocalized("版本和更新"))
+            card {
+                SelfUpdateSection()
+            }
+        }
+    }
+
+    // MARK: - 跳转目标（原样保留，一个没改）
+
+    @ViewBuilder
+    private func destinationView(for dest: SettingsDestination) -> some View {
+        switch dest {
+        case .providers:
+            ProviderInstancesView()
+        case .providerDetail(let id):
+            ProviderInstanceDetailView(instanceId: id)
+        case .modelGroups:
+            ModelGroupsView()
+        case .modelGroupDetail(let id):
+            ModelGroupDetailView(groupId: id)
+        case .usage:
+            UsageStatsView()
+        case .skills:
+            SkillsManagementView()
+        case .soul:
+            SoulSettingsView()
+        case .tools:
+            ToolsSettingsView()
+        case .memory:
+            MemoryManagementView()
+        case .storage:
+            StorageManagementView()
+        case .mountedFolders:
+            MountedFoldersSettingsView()
+        case .sharedFolders:
+            SharedFoldersSettingsView()
+        case .logs:
+            // Pull a one-shot tab hint from the deep link router
+            // (e.g. `?tab=config-audit`). LogManagementView clears
+            // its local state independently; the published value
+            // here is consumed once and reset to nil.
+            LogManagementView(initialTab: deepLink.pendingLogsTab ?? "logs")
+                .onAppear { deepLink.pendingLogsTab = nil }
+        case .relayAdmin:
+            RelayAdminView()
+        case .relayRouter:
+            RelayRouterView()
+        case .appearance:
+            AppearanceSettingsView()
+        case .background:
+            EnhancedBackgroundSettingsView()
+        case .about:
+            AboutView()
+        case .environments:
+            EnvironmentVariablesView()
+        case .permissions:
+            OffloadPermissionSettingsView()
+        // [T-mcp-oauth-deeplink] Detail = the list view told to open
+        // the server's edit sheet on appear; a deleted/unknown server
+        // just lands on the list (no crash, sensible fallback).
+        case .mcpIntegrations:
+            MCPIntegrationsView()
+        case .mcpServerDetail(let serverId):
+            MCPIntegrationsView(initialEditServerId: serverId)
+        }
+    }
+
 
     /// Translate `DeepLinkCoordinator.pendingSettingsTarget` into a
     /// NavigationStack push and clear the pending value. Called from
@@ -650,7 +766,7 @@ struct SettingsSheet: View {
         components.scheme = "mailto"
         components.path = "dev@openminis.app"
         components.queryItems = [
-            URLQueryItem(name: "subject", value: "Minis Feedback"),
+            URLQueryItem(name: "subject", value: "全能AI Feedback"),
             URLQueryItem(name: "body", value: body),
         ]
         return components.url
@@ -728,63 +844,6 @@ struct SettingsSheet: View {
             }
         }
         return id.isEmpty ? UIDevice.current.model : id
-    }
-}
-
-// MARK: - 说话模式
-
-/// 把自动判定给出的说话模式固定下来。
-///
-/// 刻意只用系统 `List` 的行样式 —— 与设置页其它行同一套语法，
-/// 不引入第二套卡片组件，也不改设置页原本的视觉。
-///
-/// 为什么需要这个页面：自动判定是按「能力域」给默认说话模式的
-/// （逆向域 → 逆向专家、Web 域 → 安全研究）。同一件事用户偶尔想换口径，
-/// 比如写检查脚本时希望话少一点。以前只能改词表，现在一行设置就够。
-struct SpeakingModesView: View {
-
-    @State private var selected = RouteModePref.current
-
-    var body: some View {
-        List {
-            Section {
-                ForEach(RouteModePref.all, id: \.self) { id in
-                    Button {
-                        selected = id
-                        RouteModePref.set(id)
-                    } label: {
-                        HStack(spacing: 12) {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(RouteModePref.label(id))
-                                    .foregroundStyle(Color.primary)
-                                if id == "auto" {
-                                    Text("按能力域自动选，不干预")
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                }
-                            }
-                            Spacer(minLength: 0)
-                            if selected == id {
-                                Image(systemName: "checkmark")
-                                    .font(.system(size: 14, weight: .semibold))
-                                    .foregroundStyle(Color.accentColor)
-                            }
-                        }
-                        .contentShape(Rectangle())
-                    }
-                    // 不用 .plain：List 行要保留系统的按下高亮，
-                    // .plain 会把整行高亮去掉，点起来像没反应。
-                    .buttonStyle(.borderless)
-                }
-            } header: {
-                Text("说话模式")
-            } footer: {
-                Text("选定后一直用它；选「自动」则每次按你这句话的内容判定。改完立刻生效，下一条消息就按新口径。")
-            }
-        }
-        .navigationTitle("说话模式")
-        .navigationBarTitleDisplayMode(.inline)
-        .onAppear { selected = RouteModePref.current }
     }
 }
 

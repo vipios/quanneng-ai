@@ -72,6 +72,24 @@ struct RelayRoute: Equatable {
         kind == .lan ? "在家 · 直连" : "在外 · 域名"
     }
 
+    /// 路由器页顶部概览卡的标题。
+    ///
+    /// 与 `label` 分开是有原因的：`label` 说的是「中转站走哪条线」，
+    /// 而路由器页讲的是**路由器本身**。模板里两页的标题分别是
+    /// 「中转站 · 直连」和「路由器 · 直连」，用同一个 label 会串词。
+    var routerLabel: String {
+        kind == .lan ? "路由器 · 直连" : "路由器 · 在外"
+    }
+
+    /// 路由器的实际访问地址（带端口，给界面看）。
+    ///
+    /// 不能用 `displayAddress` —— 那个是**后台**地址（内网 8080）。
+    /// 路由器指令走的是 uhttpd：内网 80、域名 443。
+    /// 把 8080 摆在路由器页上，用户照着敲浏览器是打不开的。
+    var routerDisplayAddress: String {
+        kind == .lan ? "\(host):80" : host
+    }
+
     var detail: String {
         kind == .lan ? "本地网络，最快" : "公网隧道，绕一圈"
     }

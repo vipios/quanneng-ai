@@ -92,13 +92,16 @@ struct AddRelayProviderView: View {
             }
         }
         .onAppear {
-            // 预填上次用过的中转站地址，减少重复输入
-            if homeURL.isEmpty {
-                homeURL = "http://\(RelayVault.shared.homeHost):8080"
-            }
-            if awayURL.isEmpty {
-                awayURL = "https://\(RelayVault.shared.awayHost)"
-            }
+            // [R42] 不再预填地址。
+            //
+            // 原来这里会填 `http://192.168.1.88:8080` 和
+            // `https://xxxx.dpdns.org` —— 那是我自己家的真实内网 IP 和
+            // 域名，随 App 一起发出去，等于把家里的网络结构公开了。
+            // 用户明确要求这两个地址自己填，所以留空。
+            //
+            // 顺带一个实际问题：预填了真实地址之后，用户不想要也会
+            // 直接保存，然后每次请求都先去敲一个不属于他的 IP，白等超时。
+            label = ""
         }
     }
 
@@ -113,7 +116,8 @@ struct AddRelayProviderView: View {
 
     private var basicsSection: some View {
         Section {
-            TextField("例如：家里中转站", text: $label)
+            // [R42] 占位文案去掉「家里」两个字 —— 写成「例如：中转站」。
+            TextField("例如：中转站", text: $label)
 
             Picker("协议", selection: $protocolKind) {
                 ForEach(RelayProtocolKind.allCases) { k in
@@ -126,9 +130,9 @@ struct AddRelayProviderView: View {
             }
         } header: {
             Text("基础")
-        } footer: {
-            Text("协议类型决定走哪套接口：OpenAI 兼容走 /v1/chat/completions，Anthropic 兼容走 /v1/messages。中转站两种都支持时选 OpenAI 兼容即可。")
         }
+        // [R42] footer 说明整段删掉。用户明确要求「剩下的那几个小字都删除」——
+        // 表单上每段说明都占两三行，把本来就短的输入区挤没了。
     }
 
     // MARK: - 地址
@@ -139,7 +143,8 @@ struct AddRelayProviderView: View {
                 Text("内网地址")
                     .font(.caption)
                     .foregroundColor(.secondary)
-                TextField("http://192.168.1.88:8080", text: $homeURL)
+                // [R42] 占位符原来是真实内网 IP，换成通用的写法示例。
+                TextField("http://<内网地址>:<端口>", text: $homeURL)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                     .keyboardType(.URL)
@@ -151,7 +156,8 @@ struct AddRelayProviderView: View {
                 Text("外网地址")
                     .font(.caption)
                     .foregroundColor(.secondary)
-                TextField("https://xxx.dpdns.org", text: $awayURL)
+                // [R42] 原来填的是真实域名，同样换掉。
+                TextField("https://<外网域名>", text: $awayURL)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                     .keyboardType(.URL)
@@ -176,9 +182,8 @@ struct AddRelayProviderView: View {
             .disabled(testing)
         } header: {
             Text("两个地址")
-        } footer: {
-            Text("这里要连**完整地址**（含协议和端口），和「中转站后台」的线路设置不同——那边只填主机名。内网快 35 倍，所以在家一定走内网。")
         }
+        // [R42] footer 删掉（「这里要连完整地址…内网快 35 倍」那段）。
     }
 
     // MARK: - Key
@@ -190,9 +195,8 @@ struct AddRelayProviderView: View {
                 .autocorrectionDisabled()
         } header: {
             Text("API Key")
-        } footer: {
-            Text("存在系统钥匙串里，不会写进配置文件，也不会上传到任何服务器。")
         }
+        // [R42] footer 删掉（钥匙串那段说明）。
     }
 
     // MARK: - 线路偏好
@@ -233,9 +237,8 @@ struct AddRelayProviderView: View {
             }
         } header: {
             Text("线路选择")
-        } footer: {
-            Text("自动判定会在每次发请求前探一次内网地址（超时 1.2 秒）。固定在家或固定在外时选「只用」，可以省掉这次探测。")
         }
+        // [R42] footer 删掉（自动判定探活那段说明）。
     }
 
     // MARK: - 测试结果

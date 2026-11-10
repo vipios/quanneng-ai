@@ -132,19 +132,21 @@ struct ProviderInstancesView: View {
                     } label: {
                         Label(AppLocalized("Add Provider"), systemImage: "plus")
                     }
-                    Button {
-                        showImportFile = true
-                    } label: {
-                        Label(AppLocalized("Import Provider"), systemImage: "square.and.arrow.down")
-                    }
-                    // [T-minis-relay] 「添加 AI 中转站」放在「添加 AI 服务商」
-                    // 与「导入服务商」之后（R9）。中转站是服务商的一种特殊形态
-                    // （配两个地址、自动选线路），所以并列在同一个菜单里，
-                    // 而不是另开一个入口。
+                    // [R42] 「添加 AI 中转站」和「导入服务商」换了位置。
+                    //
+                    // 原来的顺序是「添加服务商 / 导入服务商 / 添加中转站」，
+                    // 中转站排在最下面。但在这台机器上，中转站是主路（服务商
+                    // 那条基本不用），排在第三位要多扫两行才找得到。换到第二位
+                    // 之后，「添加 / 导入」这种一次性的动作退到最后。
                     Button {
                         showAddRelay = true
                     } label: {
                         Label(AppLocalized("Add AI Relay"), systemImage: "network")
+                    }
+                    Button {
+                        showImportFile = true
+                    } label: {
+                        Label(AppLocalized("Import Provider"), systemImage: "square.and.arrow.down")
                     }
                     if #available(iOS 17.0, *), iCloudSyncEnabled {
                         Divider()

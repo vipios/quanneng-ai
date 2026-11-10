@@ -32,6 +32,32 @@
 //     ✗ 不补 viewport meta（页面自带，改了反而破坏适配）
 //     ✓ allowsBackForwardNavigationGestures = false（别抢横向手势）
 //  ============================================================
+//  三、R43：表格被「按屏幕宽压扁」，不是不能滑（用户 2026-11-10 明确）
+//
+//  现象：账户表格右侧那几列（备注、余额、代理…）在手机上看不到，
+//        而且怎么划都不动。用户原话「有的账号信息右侧很长」「不要固定死界面」。
+//
+//  根因在 relay.py 的表格自身，两处，都在它那边而不是在我们这边：
+//    ① `table.acct{ table-layout:fixed; width:100% }`
+//       fixed 布局 + 100% 宽 = 把总宽**锁死**成屏幕宽，列宽按 colgroup
+//       的 px 值压缩分配。内容再长也只会在格子里省略号，永远不产生溢出，
+//       于是「这表格不需要横滑」—— 浏览器就是这么理解的。
+//    ② `html,body{ max-width:100vw; overflow-x:hidden }`（手机端媒体查询）
+//       这道闸把整页的横向溢出裁掉。即使某个子元素真宽了，也滑不出去。
+//
+//  所以我们这边的任何「WKWebView 手势」都救不了它 —— 网页自己认定
+//  没有横向可滚动内容，手势再灵敏也没东西可滚。这是**必须注入 CSS**
+//  的那一类改动，注入的是样式，不是数据，不动功能逻辑。
+//
+//  注入的三条（见 horizontalScrollCSS）：
+//    ① 表格切回 auto 布局并给 min-width，让它真的变宽、真的溢出
+//    ② 直接父容器变成横向滚动容器
+//    ③ 只放开**表格这一层**的横向裁剪，body 的 overflow 保持不动
+//       —— 放宽 body 会让整页（含顶部栏）跟着左右晃，那是另一个毛病。
+//
+//  ⚠️ 这里的 CSS 只在 origin 匹配时注入（同 injectionScripts 的闸），
+//     跨域子帧一律不动。
+// ============================================================
 
 import SwiftUI
 import WebKit
@@ -83,25 +109,40 @@ struct RelayAdminView: View {
                     placeholder
                 }
 
+                // [R43-方案A] 首屏遮罩。网页加载期间盖一层，
+                // 文案和底色都取模板 webmask（#f7f7f9 + 「正在连接中转站…」）。
+                // 不加这层，慢线路时会先看到一片白，看不出是在连还是坏了。
+                if loading && loadError.isEmpty {
+                    loadingMask
+                }
+
                 if !loadError.isEmpty {
                     failCard
                 }
             }
+
+            // [R43-方案A] 底部地址栏，对齐模板 .webbar：
+            // 左地址（11px 等宽、中间截断）+ 右连接状态，高 34。
+            statusBar
         }
         .background(Color(.systemGroupedBackground))
-        .navigationTitle("中转站")
+        // [R43-方案A] 模板这张页的标题是「网页后台」，返回按钮上才是「中转站」。
+        // 原生这里返回按钮的字由上一级页自动给，所以标题得对到「网页后台」。
+        .navigationTitle("网页后台")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
+            // [R43-方案A] 模板这张页的右上是**一个**刷新按钮（返回键在左）。
+            // 原来这里还有一个加载转圈 —— 现在由 loadingMask 和底部状态栏
+            // 两处表达加载中，转圈是第三个重复信号，去掉。
             ToolbarItem(placement: .topBarTrailing) {
                 HStack(spacing: 14) {
-                    if loading {
-                        ProgressView().scaleEffect(0.8)
-                    }
                     Button {
                         retry()
                     } label: {
                         Image(systemName: "arrow.clockwise")
                     }
+                    // 齿轮是原生独有的入口（线路/密码设置），模板没有对应项，
+                    // 但去掉会让「密码失效」时无处可改 —— 保留。
                     Button {
                         showSettings = true
                     } label: {
@@ -138,11 +179,72 @@ struct RelayAdminView: View {
         }
     }
 
+    // MARK: - 模板对齐的两块壳（R43 · 方案 A）
+
+    /// 首屏遮罩。取值照 `#pageMiniSys .webmask`：底色 `#F7F7F9`，
+    /// 转圈 22 见方、灰色描边，文案 14pt 次级灰、距转圈 12。
+    private var loadingMask: some View {
+        VStack(spacing: 12) {
+            ProgressView()
+                .scaleEffect(1.0)
+            Text("正在连接中转站…")
+                .font(.system(size: 14))
+                .foregroundColor(Color(red: 0x8E/255, green: 0x8E/255, blue: 0x93/255))
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color(red: 0xF7/255, green: 0xF7/255, blue: 0xF9/255))
+    }
+
+    /// 底部地址栏。对齐 `#pageMiniSys .webbar`：
+    /// 高 34、左右 16、上边 0.5 分隔线、底色 rgba(249,249,249,.94)、
+    /// 地址 11pt 等宽中间截断、状态 11.5pt 绿色（失败转红）。
+    ///
+    /// 模板里这一条一直存在，是有用的：它把「现在连的是哪个地址」摆在明面上。
+    /// 用户在外网进了内网地址时，一眼能看出连错了线，不用去设置页翻。
+    private var statusBar: some View {
+        HStack(spacing: 8) {
+            Text(route?.displayAddress ?? "—")
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundColor(Color(red: 0x8E/255, green: 0x8E/255, blue: 0x93/255))
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            Text(statusText)
+                .font(.system(size: 11.5, weight: .medium))
+                .foregroundColor(statusOK
+                                 ? Color(red: 0x34/255, green: 0xC7/255, blue: 0x59/255)
+                                 : Color(red: 0xFF/255, green: 0x3B/255, blue: 0x30/255))
+                .fixedSize()
+        }
+        .padding(.horizontal, 16)
+        .frame(height: 34)
+        .frame(maxWidth: .infinity)
+        .background(Color(red: 0xF9/255, green: 0xF9/255, blue: 0xF9/255).opacity(0.94))
+        .overlay(alignment: .top) {
+            Rectangle()
+                .fill(Color(.separator))
+                .frame(height: 0.5)
+        }
+    }
+
+    private var statusOK: Bool { loadError.isEmpty && !store.needsPassword }
+
+    private var statusText: String {
+        if !loadError.isEmpty { return "连不上" }
+        if store.needsPassword { return "密码失效" }
+        if loading { return "连接中" }
+        return "已连接"
+    }
+
     /// 没密码时的占位。
     ///
     /// [R33-直填] 原来这里是「还没有后台密码 + 去设置」两行字加一个跳转按钮。
     /// 用户要求取消这一步：进页面就能填地址和密码，填一次就记住。
     /// 现在直接嵌 `RelayQuickSetupForm`（与路由器页同一份，含外网地址）。
+    ///
+    /// [R44-补回] 这条功能在 R43 重排外壳时被我漏掉了，被退回到
+    /// 「去设置」的老样子。用户当初明确要求的就是不要那一步，所以补回来。
     private var placeholder: some View {
         ScrollView {
             VStack(spacing: 14) {
@@ -160,9 +262,8 @@ struct RelayAdminView: View {
                     .padding(.top, 20)
                 }
             }
-            .frame(maxWidth: .infinity)
-            .padding(.bottom, 24)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(.systemGroupedBackground))
     }
 
@@ -389,6 +490,65 @@ private struct RelayWebContainer: UIViewRepresentable {
         return "\(scheme)://\(host)"
     }
 
+    /// 只做横向滚动的那段 CSS（R43）。
+    ///
+    /// 网页自己的 `table.acct{table-layout:fixed;width:100%}` 把总宽锁成屏幕宽，
+    /// 所以「表格里没有可滚内容」—— 手势再灵敏也没东西可滑。
+    /// 这里把宽度还给内容，并让它自己成为一个横向滚动容器。
+    ///
+    /// 三条改动，逐条对应一个问题：
+    ///   ① `table-layout:auto` + `width:max-content`
+    ///      让表格按内容真实宽度排开，而不是被压成屏幕宽。
+    ///   ② 另外三张会在手机上挤扁的表（rltab / models-table / doc-tbl）同理。
+    ///   ③ 把表格的**直接父容器**变成 `overflow-x:auto`。
+    ///      不改 body —— body 一放开，整页（含顶部导航）都会跟着左右晃。
+    ///
+    /// `-webkit-overflow-scrolling:touch` 是必须的：不加的话 iOS 上
+    /// 滚动是逐帧同步的，手指一停就戛然而止，手感很硬。
+    ///
+    /// - Parameter origin: 本页 origin，用于同源闸（与密钥注入同一套判据）。
+    static func horizontalScrollScript(origin: String) -> String {
+        """
+        (function(){
+          if (location.origin !== \(jsStringLiteral(origin))) return;
+          if (window.__minisRelayHScroll) return;
+          window.__minisRelayHScroll = true;
+
+          var css = [
+            /* ① 账户表格：从「按屏宽压缩」改成「按内容展开」 */
+            'table.acct{table-layout:auto !important;width:max-content !important;min-width:100% !important}',
+            'table.acct td,table.acct th{white-space:nowrap !important}',
+            'table.acct td{overflow:visible !important;text-overflow:clip !important}',
+
+            /* ② 另外三张在手机上会被挤扁的表 */
+            'table.rltab,table.models-table,.doc-tbl{table-layout:auto !important;width:max-content !important;min-width:100% !important}',
+            'table.models-table td,table.models-table th,table.rltab td,table.rltab th{white-space:nowrap !important}',
+
+            /* ③ 装表格的容器成为横向滚动条 */
+            '.card-b{overflow-x:auto !important;-webkit-overflow-scrolling:touch !important}',
+            '.doc-tbl{display:block !important;overflow-x:auto !important;-webkit-overflow-scrolling:touch !important}',
+
+            /* 本来就有 overflow-x:auto 的那几块，补上手感 */
+            '.heat,.rl-list,.rp-heatwrap,#nav,.tools,.dw-tabs{-webkit-overflow-scrolling:touch !important}',
+
+            /* 隐藏横向滚动条，滑动仍然可用 */
+            '.card-b::-webkit-scrollbar,.doc-tbl::-webkit-scrollbar{height:0 !important}'
+          ].join('\\n');
+
+          function inject(){
+            if (document.getElementById('__minis_hscroll')) return;
+            var s = document.createElement('style');
+            s.id = '__minis_hscroll';
+            s.textContent = css;
+            (document.head || document.documentElement).appendChild(s);
+          }
+
+          inject();
+          document.addEventListener('DOMContentLoaded', inject);
+        })();
+        """
+    }
+
     /// 两段注入脚本：localStorage 优先，请求头兜底。
     /// 顺序不能反 —— localStorage 必须第一条，页面首屏请求就靠它。
     ///
@@ -454,7 +614,7 @@ private struct RelayWebContainer: UIViewRepresentable {
         })();
         """
 
-        return [keyJS, headerJS]
+        return [keyJS, headerJS, horizontalScrollScript(origin: origin)]
     }
 
     final class Coordinator: NSObject, WKNavigationDelegate {

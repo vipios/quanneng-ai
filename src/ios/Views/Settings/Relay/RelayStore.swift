@@ -14,14 +14,17 @@
 //  刻意没有的东西（都是踩过的坑，别再捡回来）：
 //    ✗ WiFi 名判定（读不到 SSID，实测 wifi="nil"）
 //    ✗ 定时轮询（白耗电，而且每次判定都可能翻线路）
-//    ✗ NWPathMonitor 指纹比对（同一 WiFi 换 SSID 它不回调）
 //    ✗ 扫一堆候选地址 + 把探测结果写回用户配置
 //    ✗ 判定失败后自动换对面重试（两条来回翻，永远出不来）
+//
+//  NWPathMonitor 用了一点点，但**只用作「换网了，立刻重判」的信号**，
+//  不拿它做线路判定本身（它分不清「同一个 WiFi 换 SSID」，
+//  也说明不了家里的中转站通不通）。
 //  ============================================================
 
 import Foundation
-import SwiftUI
 import Network
+import SwiftUI
 
 @MainActor
 final class RelayStore: ObservableObject {
@@ -115,15 +118,10 @@ final class RelayStore: ObservableObject {
     /// 用户一直停在前台、中途换了网络 —— 走出家门 Wi‑Fi 掉、蜂窝起来 ——
     /// 页面上的线路还是旧的：明明已经在外，界面仍写「在家 · 直连」，
     /// 点重启会打一个已经不可达的内网地址，看着像按钮坏了。
-    ///
-    /// 用 NWPathMonitor 而不是定时器：事件驱动，网络不变就一声不响，
-    /// 不耗电（RelayRoute.swift 里明确写了不做定时轮询）。
     private func startPathWatch() {
         guard !pathStarted else { return }
         pathStarted = true
         pathMonitor.pathUpdateHandler = { [weak self] path in
-            // 只关心「通不通」和「走的哪种接口」。Wi‑Fi 名字不管 ——
-            // TrollStore 装的 App 读不到 SSID（见 RelayRoute.swift 第一条）。
             let key = "\(path.status == .satisfied)/"
                 + "\(path.usesInterfaceType(.wifi))/"
                 + "\(path.usesInterfaceType(.cellular))"
@@ -295,15 +293,20 @@ final class RelayStore: ObservableObject {
         vaultRevision += 1
     }
 
+    /// 存路由器型号。只影响路由器页那行展示，但不 +1 的话
+    /// 那个页面读 `RelayVault.shared.routerModel` 建立不起依赖，
+    /// 用户改完回来还是旧值 —— 和密码那边是同一个坑。
+    func changeRouterModel(_ raw: String) {
+        RelayVault.shared.routerModel = raw
+        vaultRevision += 1
+    }
+
     // MARK: - 操作
 
     enum PowerAction {
         case restartRelay
         case rebootRouter
 
-        var title: String {
-            self == .restartRelay ? "只重启中转站" : "重启路由器"
-        }
         var confirmTitle: String {
             self == .restartRelay ? "只重启中转站？" : "重启整个路由器？"
         }

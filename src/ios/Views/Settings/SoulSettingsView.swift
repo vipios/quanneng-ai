@@ -47,7 +47,7 @@ struct SoulSettingsView: View {
 
             Section(AppLocalized("Identity")) {
                 LabeledContent(AppLocalized("Name")) {
-                    TextField("Minis", text: $name)
+                    TextField("全能AI", text: $name)
                         .multilineTextAlignment(.trailing)
                         .textInputAutocapitalization(.words)
                         .submitLabel(.done)
@@ -110,6 +110,8 @@ struct SoulSettingsView: View {
         }
         .navigationTitle(AppLocalized("Soul"))
         .navigationBarTitleDisplayMode(.inline)
+        // [R42-统一外观] 和设置首页同一套底色 / 紧致标题。
+        .settingsPageChrome()
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Button(AppLocalized("Save")) { save() }
@@ -228,7 +230,7 @@ struct SoulSettingsView: View {
                 Text(AppLocalized("Any image works. It's cropped to a square and shown with rounded corners."))
             }
             VStack(alignment: .leading, spacing: 2) {
-                Text(name.isEmpty ? "Minis" : name)
+                Text(name.isEmpty ? "全能AI" : name)
                     .font(.title3.weight(.semibold))
                 if !style.trimmingCharacters(in: .whitespaces).isEmpty {
                     Text(style)

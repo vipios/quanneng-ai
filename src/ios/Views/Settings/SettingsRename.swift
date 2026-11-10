@@ -51,7 +51,9 @@ enum SettingsRowId: String, CaseIterable {
     case agentTools         = "agentTools"
     case subAgents          = "subAgents"
     case skills             = "skills"
-    case speakingMode       = "speakingMode"
+    // [R42] 说话模式。放在 skills 之后、soul 之前 ——
+    // 它和「技能、人格」是同一组三元组的三个面，排在一起才看得出关系。
+    case modes              = "modes"
     case soul               = "soul"
     case memory             = "memory"
     case mcpIntegrations    = "mcpIntegrations"

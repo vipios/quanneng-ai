@@ -541,7 +541,7 @@ actor ISHExecutionCoordinator {
                 Self.unregisterAbandon(myId)
                 Task { await self.recordInflightPid(sessionId: sessionId, id: myId, pid: 0) }
                 pidCallback(0)
-                let notice = "[Stopped by user. The command did not exit within \(Int(Self.stopAbandonGrace))s of the stop signal - it is probably blocked in file I/O (for example an iCloud folder waiting to sync) - so Minis stopped waiting for it.]"
+                let notice = "[Stopped by user. The command did not exit within \(Int(Self.stopAbandonGrace))s of the stop signal - it is probably blocked in file I/O (for example an iCloud folder waiting to sync) - so 全能AI stopped waiting for it.]"
                 let output = outputEndingWith(notice, emptyNotice: notice)
                 logger.warning("[ShellStop] abandoned pid=\(pid) sid=\(sessionId.prefix(8)) — no exit \(Self.stopAbandonGrace)s after stop")
                 continuation.resume(returning: ISHCommandResult(output: output, exitCode: -1))

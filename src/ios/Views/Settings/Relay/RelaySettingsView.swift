@@ -23,6 +23,8 @@ struct RelaySettingsView: View {
     @State private var awayHost = RelayVault.shared.awayHost
     @State private var newPass = ""
     @State private var newRouterKey = ""
+    /// 路由器型号（纯展示，用户自己填）。留空显示「未配置」。
+    @State private var routerModel = RelayVault.shared.routerModel
     @State private var showAdvanced = false
     @State private var showLog = false
     @State private var verifyState: VerifyState = .idle
@@ -59,6 +61,7 @@ struct RelaySettingsView: View {
             routeSection
             passwordSection
             routerKeySection
+            modelSection
             statusSection
             diagnosticsSection
         }
@@ -216,10 +219,8 @@ struct RelaySettingsView: View {
                 Text(saveError)
                     .foregroundColor(.red)
             } else {
-                // 用户要求删掉「密码用 AES-GCM 加密…」那句 —— 技术实现
-                // 不该摆在设置项下面当前情说明。只在没存过时说一句用途。
                 Text(remembered
-                     ? "进后台、重启中转站、重启路由器都直接用它，不会再让你输入。"
+                     ? "密码用 AES-GCM 加密后只存在这台手机上。进后台、重启中转站、重启路由器都直接用它，不会再让你输入。"
                      : "只需输入这一次。存好之后进后台、重启设备都不会再问你。")
             }
         }
@@ -269,8 +270,27 @@ struct RelaySettingsView: View {
         }
     }
 
-    // MARK: - 当前状态
+    // MARK: - 型号
 
+    /// 路由器型号。**只是显示用**，不参与任何判定。
+    ///
+    /// 为什么不自动探测：airboot 的响应里没有型号字段（只有
+    /// ok / svc / err），relay.py 的 /admin/api/device 也只回
+    /// uptime / mem / load / swap，没有 SoC 型号。想「自动填一个」
+    /// 只能靠猜，猜错就是界面上挂着一句假话 —— 不如让人自己填一次。
+    private var modelSection: some View {
+        Section {
+            TextField("例如 MT7621", text: $routerModel)
+                .textInputAutocapitalization(.characters)
+                .autocorrectionDisabled()
+        } header: {
+            Text("路由器型号")
+        } footer: {
+            Text("只显示在路由器页顶部，不参与任何判断。留空就显示「未配置」。")
+        }
+    }
+
+    // MARK: - 当前状态
     private var statusSection: some View {
         Section {
             if let r = store.route {
@@ -392,6 +412,10 @@ struct RelaySettingsView: View {
         // 所以地址先落，后面的验证与 refresh 都用新地址。
         RelayVault.shared.homeHost = homeHost
         RelayVault.shared.awayHost = awayHost
+        // 型号不加密、也没有「留空则不改」的语义 —— 清空就是清空，
+        // 那是用户明确要把「未配置」写回去。走 store 是为了 +1 vaultRevision，
+        // 让路由器页那行重新算。
+        store.changeRouterModel(routerModel)
 
         let pass = newPass.trimmingCharacters(in: .whitespacesAndNewlines)
         if !pass.isEmpty {
@@ -498,13 +522,17 @@ struct RelayLogView: View {
 
 /// 中转站页与路由器页在「什么都没配」时显示同一张表单。
 ///
-/// 为什么抽成一份：这两页都是「进页面就要能用」的入口，字段和验证逻辑
-/// 完全一样（直连地址 / 外网地址 / 后台密码）。各写一份的话，以后改
-/// 验证顺序很自然只改一边，表现就是「路由器页填了能用，中转站页填了
-/// 一直说密码不对」——这种不一致用户根本查不出来。
+/// [R33-直填] 以前这两页在没配过的时候只摆两行字「还没有后台密码」+ 一个
+/// 「去设置」按钮，把用户推到另一个页面再填。用户明确要求取消这一步：
+/// 进页面就能填地址和密码，填一次就记住。
 ///
-/// 刻意**不**跳 RelaySettingsView：那份设置页是给「已经配好了、要精调」
-/// 的场景准备的（换密码、看诊断、看日志）。第一次填只需要三个字段。
+/// 为什么抽成一份而不是各写一遍：两页的字段和验证逻辑完全一样
+/// （直连地址 / 外网地址 / 后台密码）。各写一份的话，以后改验证顺序
+/// 很自然只改一边，表现就是「路由器页填了能用，中转站页填了一直说
+/// 密码不对」—— 这种不一致用户根本查不出来。
+///
+/// 刻意**不**跳 `RelaySettingsView`：那份设置页是给「已经配好了、要精调」
+/// 的人用的，字段多、还有诊断日志。新用户面对它只会不知道从哪儿下手。
 struct RelayQuickSetupForm: View {
 
     /// 保存成功并已刷新线路后回调，让调用方决定要不要切界面。
@@ -576,7 +604,7 @@ struct RelayQuickSetupForm: View {
         }
         .padding(16)
         .background(Color(.secondarySystemGroupedBackground))
-        .cornerRadius(12)
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 
     private func field(_ title: String, _ placeholder: String,

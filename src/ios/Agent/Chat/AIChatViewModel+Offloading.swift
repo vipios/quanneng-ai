@@ -29,7 +29,7 @@ extension AIChatViewModel {
     /// re-issuing its own earlier `file_write` pasted the placeholder back in.
     ///
     /// Mirrors Android `ContextOffload.SYSTEM_NOTICE_TAG`.
-    nonisolated static let offloadedStubNoticeTag = "[Minis System Notice]"
+    nonisolated static let offloadedStubNoticeTag = "[全能AI System Notice]"
 
     /// Envelope opener for the current stub format. Kept separate from the tag
     /// so detection can require BOTH (a bare `<system-reminder>` is a legitimate

@@ -433,6 +433,40 @@ struct AIChatView: View {
     @State var inputBottomRowWidth: CGFloat = 0
     @Environment(\.scenePhase) private var scenePhase
 
+    // MARK: - [R43-左上角] 抽屉入口
+
+    /// 可选的抽屉状态。没有抽屉的路径（iPad 分栏、深链直达）是 nil。
+    ///
+    /// 用可选 Key 而不是 `@EnvironmentObject`：后者缺失时会直接崩，
+    /// 而「没有抽屉」在 App 里是合法状态。见 `DrawerStateOptionalKey`。
+    @Environment(\.drawerStateOrNil) private var drawerStateOrNil
+
+    /// 左上角「三横」：展开抽屉。nil = 这条路径没有抽屉，不画按钮。
+    var drawerOpenAction: (() -> Void)? {
+        guard let drawerStateOrNil else { return nil }
+        return { drawerStateOrNil.open() }
+    }
+
+    /// 左上角「书本」：**替换系统返回箭头**，点了照样回上一级。
+    ///
+    /// 只在 iPhone 导航栈里有意义 —— iPad 是分栏，没有「上一级」可回，
+    /// 那里返回 nil，系统箭头原样保留（也就不会隐藏它）。
+    ///
+    /// 判据用 `hSizeClass == .compact`，和 `stackLayout` 的选路保持一致：
+    /// 宽屏走 `splitLayout`，压根没有导航栈。
+    var drawerBackAction: (() -> Void)? {
+        guard hSizeClass == .compact else { return nil }
+        return {
+            // `dismiss` 在 NavigationStack 里就是 pop，和系统返回键同一条
+            // 路径 —— 转场动画、`onDisappear` 里那套会话挂起、栈顶 id 同步
+            // 全由 NavigationStack 负责。
+            //
+            // 不要自己改 `navigationPath`：那会绕过 `.id(id)` 的重建逻辑，
+            // 表现是「返回后再进来，对话内容还是旧的」。
+            dismiss()
+        }
+    }
+
     // MARK: - [T-ipad-composer-resize] Draggable composer height (iPad only)
 
     /// Persisted composer height as a FRACTION of screen height (e.g. 0.5).
@@ -492,7 +526,7 @@ struct AIChatView: View {
     /// Default chat title for sessions without a generated title. Sourced
     /// from SOUL.md (`name`), falls back to "Minis". Refreshed on .soulMdChanged.
     @State var soulName: String = SoulStore.cachedMetadata.name.isEmpty
-        ? "Minis" : SoulStore.cachedMetadata.name
+        ? "全能AI" : SoulStore.cachedMetadata.name
 
     /// True when any sheet or fullScreenCover is presented (suppress auto-focus to avoid keyboard bugs).
     var hasOverlayPresented: Bool {
@@ -803,13 +837,35 @@ struct AIChatView: View {
         // .background position — the gate silently never engaged. EquatableView
         // wrapping is the only guaranteed path to ==.
         .background(
-            ChatToolbarHost(key: chatToolbarKey, showsTrailing: !ChatNavMenuBarItem.isEnabled, title: {
+            ChatToolbarHost(key: chatToolbarKey,
+                            showsTrailing: !ChatNavMenuBarItem.isEnabled,
+                            onOpenDrawer: drawerOpenAction,
+                            onBack: drawerBackAction,
+                            title: {
                 chatNavPrincipalContent
             }, trailing: {
                 trailingMenu
             })
             .equatable()
         )
+        // [R43-左上角书本] 换掉系统返回箭头。两条必须成对出现：
+        //   · `navigationBarBackButtonHidden` 把系统 ‹ 藏掉 —— 不藏的话
+        //     屏幕上会同时有「‹」和我们的书本，两个返回键；
+        //   · `SwipeBackEnabler` 把「藏返回键时一起失效的左滑返回」接回来。
+        // 只做第一条 = 左滑返回没了，那个代价不能接受。
+        //
+        // 挂成 `.overlay` 而不是第二个 `.background`：工具栏宿主已经在
+        // `.background` 上，再叠一层 background 有两层背景互相影响尺寸的
+        // 隐患。overlay 挂一个零尺寸、不吃触摸的探针，位置无关紧要 ——
+        // 它只负责抓一下导航控制器。
+        .navigationBarBackButtonHidden(drawerBackAction != nil)
+        .overlay {
+            if drawerBackAction != nil {
+                SwipeBackEnabler()
+                    .frame(width: 0, height: 0)
+                    .allowsHitTesting(false)
+            }
+        }
         // [T-ios-navbar-menu-baritem] Outside the equatable host on purpose:
         // its update pass is what refreshes the menu's action closures.
         .background(navBarMenuInstaller)

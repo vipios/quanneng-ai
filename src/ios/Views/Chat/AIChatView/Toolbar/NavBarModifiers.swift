@@ -21,6 +21,109 @@ import UIKit
 import UniformTypeIdentifiers
 import WebKit
 
+// MARK: - [R43] 保住左滑返回
+
+/// 隐藏系统返回键之后，把「左滑返回」这个手势重新接上。
+///
+/// ## 为什么需要它
+///
+/// SwiftUI 的 `navigationBarBackButtonHidden(true)` 不只是把那个 ‹ 藏起来 ——
+/// 它同时会让 `UINavigationController.interactivePopGestureRecognizer`
+/// **失效**。原因是 UIKit 把手势的 delegate 挂在系统返回按钮上，
+/// 按钮一消失，delegate 就问不到「现在能不能 pop」，默认回 false，
+/// 于是整条左滑返回都没了。
+///
+/// 这是「换个图标」必须付的代价，但不能真付：用户已经习惯左滑返回，
+/// 换掉图标却把左滑弄没，比不换更糟。
+///
+/// ## 怎么做
+///
+/// 把那个手势的 delegate 抢过来，自己按 `viewControllers.count > 1` 回答
+/// 「能不能 pop」。这条判据是关键 —— 在根视图上返回 true 会让手势
+/// 去 pop 一个空栈，UIKit 会直接把界面卡死（这是这个 hack 最常见的翻车点）。
+///
+/// ## 边界
+///
+/// 只在**栈深大于 1** 时启用，根视图不响应；`viewControllers.count` 每次
+/// 都现取，不缓存 —— SwiftUI 的 NavigationStack 会在我们看不见的时候
+/// 改栈，缓存值一定会过期。
+struct SwipeBackEnabler: UIViewRepresentable {
+    func makeUIView(context: Context) -> UIView { SwipeBackView() }
+    func updateUIView(_ uiView: UIView, context: Context) {}
+
+    private final class SwipeBackView: UIView, UIGestureRecognizerDelegate {
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            // 窗口没了（页面被销毁）就交还控制权，别让一个已脱离视图树的
+            // 对象继续当 delegate —— 那种 dangling delegate 是偶发
+            // 「左滑直接卡住」的来源。
+            guard window != nil else {
+                navigationController?.interactivePopGestureRecognizer?.delegate = nil
+                return
+            }
+            // 延后一拍：`didMoveToWindow` 时 SwiftUI 可能还没把返回按钮
+            // 真正移除，UIKit 会在这之后再把 delegate 设废一次。
+            // 下一轮 runloop 接管才是最终态。
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.window != nil else { return }
+                guard let nav = self.navigationController else { return }
+                nav.interactivePopGestureRecognizer?.delegate = self
+                nav.interactivePopGestureRecognizer?.isEnabled = true
+            }
+        }
+
+        func gestureRecognizerShouldBegin(_ g: UIGestureRecognizer) -> Bool {
+            // 根视图不允许 pop —— 否则手势会把空栈当目标，界面直接僵住。
+            guard let nav = navigationController else { return false }
+            guard nav.viewControllers.count > 1 else { return false }
+
+            // 有输入框正在编辑时不起手。
+            //
+            // 聊天页的输入框贴着底部，键盘弹起来之后手指在左边缘那一条
+            // 上下滑动很常见（尤其单手），误触一次就退回会话列表 ——
+            // 而这个页面没有「回来继续写」的草稿恢复，打了一半的字就悬了。
+            // 系统自带返回键那套没有这个保护（它没被键盘顶到同一个位置），
+            // 是我们自己接管后必须补上的。
+            if let v = g.view, let window = v.window,
+               window.minis_hasTextInputFirstResponder {
+                return false
+            }
+            return true
+        }
+
+        /// 有横向滚动区域的页面（比如带横向表格的网页）要从自己身上起手，
+        /// 别被这条边缘手势抢走。
+        func gestureRecognizer(_ g: UIGestureRecognizer,
+                               shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
+            true
+        }
+    }
+}
+
+// MARK: - [R43] 判断当前有没有输入框在编辑
+
+private extension UIView {
+    /// 当前窗口里有没有「正在编辑的输入控件」。
+    ///
+    /// UIKit 没有公开 API 直接问「谁是 first responder」，只能自己走一遍
+    /// 视图树看 `isFirstResponder`。这是个 O(n) 的遍历，但只在手势
+    /// `shouldBegin` 那一刻跑一次（手指刚按下），不在渲染链上，
+    /// 对聊天页那点视图数量完全够用。
+    var minis_hasTextInputFirstResponder: Bool {
+        if isFirstResponder {
+            // 只认文字输入类。理由：按钮、手势识别器也可能是 first responder，
+            // 那些不该拦住左滑返回 —— 否则会出现「什么都没有却在编辑」
+            // 导致左滑失灵，比误触更难查。
+            return self is UITextField || self is UITextView
+        }
+        for sub in subviews where sub.minis_hasTextInputFirstResponder {
+            return true
+        }
+        return false
+    }
+}
+
 // MARK: - Nav Bar Modifiers
 
 // [T-agent-transcript-navbar] Shared with HelperTranscriptPage; logic unchanged.

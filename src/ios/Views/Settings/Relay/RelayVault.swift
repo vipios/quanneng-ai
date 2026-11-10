@@ -120,6 +120,31 @@ final class RelayVault {
         set { UserDefaults.standard.set(Self.cleanHost(newValue, fallback: Self.defaultAwayHost), forKey: kAway) }
     }
 
+    // MARK: - 路由器型号（纯展示）
+
+    /// 路由器页顶部那行「型号」。**不是探测出来的** ——
+    /// airboot 的响应里没有型号字段，MT7621 这类信息后端也没回。
+    /// 硬编一个等于在界面上写假话，所以让用户自己填一次，留空就显示「未配置」。
+    ///
+    /// 不加密：型号不是秘密，而且要在列表里直接读。
+    private let kRouterModel = "minis.relay.router.model"
+
+    var routerModel: String {
+        get {
+            let v = (UserDefaults.standard.string(forKey: kRouterModel) ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return v
+        }
+        set {
+            let v = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            if v.isEmpty {
+                UserDefaults.standard.removeObject(forKey: kRouterModel)
+            } else {
+                UserDefaults.standard.set(v, forKey: kRouterModel)
+            }
+        }
+    }
+
     /// 用户可能整段粘一个 URL 进来（http://a.b:8080/x），这里只保留 host。
     /// 空值一律回落默认值 —— 空格子等于「没配」，不能让 RelayRoute 拿到空 host。
     ///
@@ -179,9 +204,22 @@ final class RelayVault {
         return fresh
     }
 
+    /// 派生密钥用的固定盐。
+    ///
+    /// ⚠️⚠️ 这里是 `Minis.` 而不是 `全能AI.`，**故意的，不要再换字的时候改它**。
+    /// 2026-11-10 全量换字（Minis → 全能AI）把这一行也改了，后果是：
+    ///   用户机器上已经存着的密文是用 `Minis.RelayAdmin.v1` 派生的密钥加的，
+    ///   换成新盐之后派生出另一把密钥 → 老密文一律解不开 →
+    ///   `password()` 还会把「打不开的密文」当成坏数据直接删掉。
+    ///   表现就是：升级一次，之前记住的后台密码凭空消失，要重新输一遍，
+    ///   用户完全看不出为什么。
+    ///
+    /// 这个字符串不是给人看的文案，是**密钥材料**。界面上一个字都不显示它，
+    /// 改成中文没有任何收益，只会让老数据全废。所以保持原样。
+    private static let keySalt = "Minis.RelayAdmin.v1"
+
     private static func derivedKey() -> SymmetricKey {
-        let salt = "Minis.RelayAdmin.v1"
-        let seed = SHA256.hash(data: Data((deviceIdentity() + salt).utf8))
+        let seed = SHA256.hash(data: Data((deviceIdentity() + keySalt).utf8))
         return SymmetricKey(data: Data(seed))
     }
 
@@ -189,7 +227,6 @@ final class RelayVault {
     /// 只用于**解密迁移**：老密文要用老密钥才能打开，打开后立刻用新密钥重存。
     /// 新代码不再用它加密任何东西。
     private static func legacyKeys() -> [SymmetricKey] {
-        let salt = "Minis.RelayAdmin.v1"
         var ids: [String] = []
         #if canImport(UIKit)
         if let id = UIDevice.current.identifierForVendor?.uuidString, !id.isEmpty {
@@ -197,7 +234,7 @@ final class RelayVault {
         }
         #endif
         ids.append("no-idfv")
-        return ids.map { SymmetricKey(data: Data(SHA256.hash(data: Data(($0 + salt).utf8)))) }
+        return ids.map { SymmetricKey(data: Data(SHA256.hash(data: Data(($0 + keySalt).utf8)))) }
     }
 
     private static func seal(_ plain: String) -> String? {

@@ -1159,7 +1159,7 @@ struct ToolLiveSheet: View {
                 // out to the step pill's trailing column (under the
                 // elapsed-duration "5s" text) so it lives next to where the
                 // user is already scanning timing info.
-                Text("Minis Computer")
+                Text("全能AI Computer")
                     .font(.system(size: 15, weight: .semibold))
 
                 Spacer()
@@ -2841,18 +2841,18 @@ struct ToolLiveSheet: View {
 
     private var toolTitle: String {
         switch block.kind {
-        case .shellTool: return "Minis is using Shell"
-        case .fileReadTool: return "Minis is reading File"
-        case .fileWriteTool: return "Minis is using Editor"
-        case .fileEditTool: return "Minis is editing File"
-        case .browserTool: return "Minis is using Browser"
-        case .readImageTool: return "Minis is reading Image"
-        case .memoryTool: return "Minis is using Memory"
-        case .delegateTool: return "Minis is using an Agent"
-        case .userAskTool: return "Minis is asking you"
-        case .info: return "Minis"
-        case .text: return "Minis"
-        case .thinking: return "Minis"
+        case .shellTool: return "全能AI is using Shell"
+        case .fileReadTool: return "全能AI is reading File"
+        case .fileWriteTool: return "全能AI is using Editor"
+        case .fileEditTool: return "全能AI is editing File"
+        case .browserTool: return "全能AI is using Browser"
+        case .readImageTool: return "全能AI is reading Image"
+        case .memoryTool: return "全能AI is using Memory"
+        case .delegateTool: return "全能AI is using an Agent"
+        case .userAskTool: return "全能AI is asking you"
+        case .info: return "全能AI"
+        case .text: return "全能AI"
+        case .thinking: return "全能AI"
         }
     }
 

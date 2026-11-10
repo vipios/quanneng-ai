@@ -72,9 +72,26 @@ final class DrawerState: ObservableObject {
 
     var isOpen: Bool { progress > 0.5 }
 
+    /// [R42-对齐原版返回手感] 动画参数。
+    ///
+    /// 原来用的是 `interactiveSpring(response:dampingFraction:)`，
+    /// 这是 iOS 17 之前的老 API，曲线是「先快后慢」，收尾还有一点点
+    /// 硬停感。原版左滑返回用的是 `UISpringTimingParameters` 那套，
+    /// 观感是「起步跟手、末尾轻微过冲再回正」。
+    ///
+    /// 换成 `.spring(response:dampingFraction:)` 的新写法（iOS 15+ 就有），
+    /// 并用 0.86 的阻尼 —— 这是系统侧滑返回最接近的观感：
+    ///   · response 0.3 → 一次开合大约 300ms，和系统侧滑返回一致；
+    ///   · dampingFraction 0.86 → 轻微过冲，不抖。
+    ///
+    /// 阻尼低于 0.8 会在末尾明显弹一下（像坏了）；高于 0.95 就没有
+    /// 那种「吸住」的手感，变成生硬地停住。
+    private static let drawerSpring = Animation.spring(response: 0.3,
+                                                       dampingFraction: 0.86)
+
     func open(animated: Bool = true) {
         if animated {
-            withAnimation(.interactiveSpring(response: 0.32, dampingFraction: 0.86)) {
+            withAnimation(Self.drawerSpring) {
                 progress = 1
             }
         } else {
@@ -84,7 +101,7 @@ final class DrawerState: ObservableObject {
 
     func close(animated: Bool = true) {
         if animated {
-            withAnimation(.interactiveSpring(response: 0.32, dampingFraction: 0.86)) {
+            withAnimation(Self.drawerSpring) {
                 progress = 0
             }
         } else {
@@ -100,9 +117,33 @@ final class DrawerState: ObservableObject {
     /// 落点 —— 用它而不是用当前位移，快速轻扫也能正确展开。
     func settle(to target: CGFloat) {
         dragging = false
-        withAnimation(.interactiveSpring(response: 0.3, dampingFraction: 0.88)) {
+        withAnimation(Self.drawerSpring) {
             progress = target >= Self.settleThreshold ? 1 : 0
         }
+    }
+}
+
+// MARK: - 抽屉状态的可选环境入口
+
+/// [R43-左上角三横] 让聊天页顶栏能安全地问「现在有抽屉吗」。
+///
+/// 为什么不用 `@EnvironmentObject`：
+///   它是**强制解包**语义 —— 环境里没有 DrawerState 时直接崩。
+///   而 App 有多条路径不挂抽屉：iPad 的 `splitLayout`、从深链直接打开的
+///   聊天页、以及将来任何新入口。给每一条都记得注入 DrawerState 是不现实
+///   的约束，漏一条就是线上崩溃。
+///
+/// 所以这里走**可选**的 EnvironmentKey：没注入就是 nil，按钮不画，
+/// 一切照常。这是「缺失时降级」而不是「缺失时崩溃」。
+private struct DrawerStateOptionalKey: EnvironmentKey {
+    static let defaultValue: DrawerState? = nil
+}
+
+extension EnvironmentValues {
+    /// 当前是否有可展开的抽屉。nil = 这条路径没有抽屉，别画那个按钮。
+    var drawerStateOrNil: DrawerState? {
+        get { self[DrawerStateOptionalKey.self] }
+        set { self[DrawerStateOptionalKey.self] = newValue }
     }
 }
 
@@ -289,8 +330,40 @@ struct DrawerContainer<Drawer: View, Content: View>: View {
             EdgePanOverlay(state: state, drawerWidth: drawerWidth)
                 .frame(width: DrawerState.edgeSlop)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+                // [R42-有键盘也能拉] 忽略键盘安全区。
+                //
+                // 键盘弹起时 SwiftUI 会把安全区底部上移，这个手势层的
+                // 高度跟着被压短 —— 键盘上方那一段左边缘就变成死区，
+                // 「有键盘时左滑拉不出抽屉」。
+                //
+                // 这里要的是「整屏左边缘都能起手」，键盘在不在与手感
+                // 无关，所以两个方向都忽略键盘 inset。
+                .ignoresSafeArea(.keyboard, edges: .vertical)
         }
         .environmentObject(state)
+        // [R43-左上角三横] 同时以**可选**形式下发一份，给那些不能承受
+        // @EnvironmentObject 强制解包的调用点（聊天页顶栏）。两处指向
+        // 同一个 state 实例，不存在两份状态。
+        .environment(\.drawerStateOrNil, state)
+        // [R42-抽屉出来就收键盘]
+        //
+        // 用户要求：不管键盘在不在，都能左滑拉出抽屉；抽屉出来后键盘
+        // 自动收回。
+        //
+        // 为什么必须收：抽屉是盖在聊天界面上的侧栏，输入框在它下面。
+        // 键盘留着的话，屏幕下半截被键盘占住，抽屉的可视区域只剩一小条，
+        // 而且键盘弹出期间系统还会压缩安全区 —— 两个效果叠起来，
+        // 抽屉看起来「变小了」。
+        //
+        // 触发条件用 progress > 0.35 而不是 isOpen（> 0.5）：
+        // isOpen 是「已经完全展开」，但用户拉到一半就已经能看见抽屉了，
+        // 那时候键盘还挂着就很别扭。0.35 是「明显是在拉抽屉」的位置，
+        // 又不会被一次轻微的边缘误触触发。
+        .onChange(of: state.progress) { p in
+            if p > 0.35 {
+                dismissKeyboard()
+            }
+        }
         // 模板句柄给外层用（灌数据、接点击回调）。
         .environmentObject(template)
         .task {
@@ -301,6 +374,23 @@ struct DrawerContainer<Drawer: View, Content: View>: View {
 }
 
 // MARK: - 手势层
+
+/// 一句话收掉键盘。
+///
+/// 为什么用 `UIApplication.sendAction` 而不是自己找 first responder：
+///   · 自己遍历视图树找 `isFirstResponder` 要递归整棵 window，
+///     聊天界面里消息列表很长、还在流式输出，递归有代价；
+///   · `resignFirstResponder` 传 nil 目标时，UIKit 会按响应链广播，
+///     由系统自己找到当前第一响应者 —— 这是官方推荐的收键盘方式，
+///     也是 `UIViewController.view.endEditing` 内部在做的事。
+///
+/// 为什么不直接 `endEditing(true)`：那需要拿到 UIView 引用。这个函数
+/// 在 SwiftUI 的修饰符里调用，手上没有视图；`sendAction` 是全局的。
+@MainActor
+private func dismissKeyboard() {
+    UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder),
+                                    to: nil, from: nil, for: nil)
+}
 
 /// 透明的 UIKit 视图，只做一件事：识别左边缘右滑 / 抽屉内左滑。
 private struct EdgePanOverlay: UIViewRepresentable {
@@ -316,10 +406,24 @@ private struct EdgePanOverlay: UIViewRepresentable {
         v.edgeSlop = DrawerState.edgeSlop
         v.activeWidth = 0
 
-        let pan = UIPanGestureRecognizer(
+        let pan = UIScreenEdgePanGestureRecognizer(
             target: context.coordinator,
             action: #selector(Coordinator.handle(_:))
         )
+        // [R42-对齐原版返回手感] 换成边缘手势。
+        //
+        // 这是「手感」的真正来源，不是调阈值能解决的：
+        //
+        // 原来用普通 UIPanGestureRecognizer，它要等手指移动超过系统内部
+        // 的最小距离（约 10pt）才进入 .began，然后再调 delegate 判断
+        // 起手点。所以从按下到抽屉开始动，中间永远有一段死区 ——
+        // 用户的原话是「不灵敏、不丝滑」。
+        //
+        // 原版左滑返回用的是 UIScreenEdgePanGestureRecognizer：
+        // UIKit 在**触摸按下那一刻**就知道这次落点在不在屏幕边缘，
+        // 不满足就直接不认，满足就立刻开始 —— 没有那段死区。
+        // 换过来之后，起手判定交给系统，我们也不用再反推起手点。
+        pan.edges = .left
         pan.delegate = context.coordinator
         // 不和内容区的滚动手势抢：真正要接管时由 delegate 决定。
         pan.cancelsTouchesInView = false
@@ -443,35 +547,32 @@ private struct EdgePanOverlay: UIViewRepresentable {
             let v = pan.velocity(in: view)
             let isOpen = state.progress > 0.02
 
-            // 1) 方向过滤：水平位移必须明显大于垂直。
-            //    1.5 倍是试出来的：1.2 太松，列表里斜着划一下就误触；
-            //    2.0 太紧，正常斜着拉会被吃掉。
-            guard abs(v.x) > abs(v.y) * 1.5 else { return false }
-
             if isOpen {
-                // 2a) 抽屉开着：只认「往左拖」（收回去）
+                // 抽屉开着：只认「往左拖」（收回去）。
+                // 这里是纯方向判断，不做垂直比例过滤 —— 抽屉开着时
+                // 整个左边缘都归抽屉，纵向滑动本来也不该发生。
                 return v.x < 0
             }
 
-            // 2b) 抽屉关着：必须往右拖，且**起手点**在左边窄带内。
+            // 抽屉关着：必须是往右拖。
             //
-            // [R41-左滑不灵敏] 这里原来写的是
-            //     let location = pan.location(in: view)
-            //     return location.x <= DrawerState.edgeSlop
-            // 错在用「当前位置」判「起手位置」。
+            // [R42] 起手位置的判定**不在这里**了。
             //
-            // gestureRecognizerShouldBegin 不是手指按下时调的，而是
-            // pan 已经认定「开始拖动」之后才调的 —— 那时手指早就往右
-            // 移了十几二十点。32pt 的带子减掉这段位移只剩 10pt 出头，
-            // 于是绝大多数从边缘起手的滑动都被判死，用户看到的就是
-            // 「左滑不灵敏、要多试几次」。
+            // 换用 `UIScreenEdgePanGestureRecognizer` 之后，UIKit 在触摸
+            // 按下那一刻就按 `edges = .left` 过滤过了 —— 能走到这个回调
+            // 说明起手点一定在屏幕左边缘，不需要再判断。
             //
-            // 正确做法是用 pan 的起点（translation 反推）——
-            // translation 从手势开始累积，所以起点 = 当前点 - 位移。
-            let loc = pan.location(in: view)
-            let t = pan.translation(in: view)
-            let startX = loc.x - t.x
-            return startX <= DrawerState.edgeSlop
+            // 之前那段 `startX = location.x - translation.x` 的反推是给
+            // 普通 pan 补救用的（它要等手指移动十几点才回调，起手点已经
+            // 被推离边缘）。现在既没必要，也不该留着：它会把「从边缘
+            // 起手、但手指已经往右移了 40pt」这种正在正常拉动的情况
+            // 二次判死。
+            //
+            // 只留方向判定。垂直位移大于水平时让给内容区的滚动 ——
+            // 边缘手势理论上不会和纵向滚动冲突，但抽屉里那个会话列表
+            // 是纵向的，斜着划时不要抢它是必要的。
+            guard abs(v.x) > abs(v.y) else { return false }
+            return v.x > 0
         }
     }
 }

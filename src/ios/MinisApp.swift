@@ -777,7 +777,7 @@ struct MinisApp: App {
 
     private static let fileProviderDomain = NSFileProviderDomain(
         identifier: NSFileProviderDomainIdentifier("com.vipios.app.files"),
-        displayName: "Minis"
+        displayName: "全能AI"
     )
 
     /// Bumped when we need to force-rebuild the FileProvider domain on next launch

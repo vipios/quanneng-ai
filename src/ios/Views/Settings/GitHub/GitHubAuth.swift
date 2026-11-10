@@ -592,9 +592,17 @@ final class GitHubAuth {
         return gen
     }
 
+    /// 派生密钥用的固定盐。
+    ///
+    /// ⚠️⚠️ 保持 `Minis.` 前缀，**换字的时候不要动它**。
+    /// 2026-11-10 那次全量换字把它改成了「全能AI.」，后果是：老用户机器上
+    /// 已存的 GitHub token 是用旧盐派生的密钥加密的，新盐派生出另一把密钥
+    /// → 一个都解不开，而且解不开的密文会被当成坏数据清掉。
+    /// 这是一段密钥材料，不是界面文案，界面上永远不显示它。
+    private static let keySalt = "Minis.GitHubAuth.v1"
+
     private static func symmetricKey() -> SymmetricKey {
-        let salt = "Minis.GitHubAuth.v1"
-        let raw = SHA256.hash(data: Data((deviceIdentity() + salt).utf8))
+        let raw = SHA256.hash(data: Data((deviceIdentity() + keySalt).utf8))
         return SymmetricKey(data: Data(raw))
     }
 

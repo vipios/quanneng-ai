@@ -27,10 +27,7 @@ extension ContentView {
     /// in ProviderConfigStore.init, so a set-up user never matches, and a first
     /// launch no longer flashes the buttons while the (empty) list loads.
     func hidesFABForOnboarding(listIsEmpty: Bool) -> Bool {
-        // [R33-去引导页] 以前这里返回 true：列表空 + 没配模型时连「新建任务」
-        // 按钮都藏起来，只留那张引导页。引导页已经删了，再藏按钮就等于
-        // 空列表上一片死寂 —— 用户能看见的只有一个什么都点不了的页面。
-        false
+        listIsEmpty && !showSearchBar && providerStore.modelGroups.isEmpty
     }
 
     var emptyState: some View {
@@ -46,7 +43,7 @@ extension ContentView {
                 .padding(.bottom, 4)
 
             VStack(spacing: 8) {
-                Text("Welcome to Minis")
+                Text("Welcome to 全能AI")
                     .font(.title2.bold())
                 Text("Your first On-Device Agent is almost ready.")
                     .font(.subheadline)

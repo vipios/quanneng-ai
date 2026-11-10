@@ -89,7 +89,7 @@ struct AboutView: View {
                                     .stroke(Color(UIColor.separator), lineWidth: 0.5)
                             )
                     }
-                    Text("Minis · 改造版")
+                    Text("全能AI · 改造版")
                         .font(.title2.bold())
                     Text("Version \(appVersion)")
                         .font(.subheadline)

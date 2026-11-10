@@ -114,7 +114,28 @@ enum RouteInjector {
     /// 调用点不该为「没判出来」写分支，默认值本身就是一种判定。
     static func make(from text: String?) -> RouteInjection {
         let raw = (text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        let decision = RouteEngine.decide(raw)
+        var decision = RouteEngine.decide(raw)
+
+        // [R42-手动指定说话模式]
+        //
+        // 用户在设置里选了某个具体模式时，只把三元组里的 `mode` 换掉，
+        // 域和人格保持自动判定的结果。
+        //
+        // 为什么只换 mode：域和人格回答的是「这是什么活、由谁干」，
+        // 用户手挑没有意义（他描述任务，我们判活）；而说话模式是
+        // 「输出风格」，这是主观偏好，只能他说了算。
+        //
+        // 默认值是「自动」，所以没进过设置页的人行为完全不变 ——
+        // 这里等于什么都没做。
+        if SpeakModeSettings.isPinned {
+            decision = RouteDecision(domain: decision.domain,
+                                     persona: decision.persona,
+                                     mode: SpeakModeSettings.selected,
+                                     hit: decision.hit,
+                                     confident: decision.confident,
+                                     scores: decision.scores)
+        }
+
         let device = DeviceContextBuilder.context(for: decision)
         return RouteInjection(decision: decision,
                               device: device,

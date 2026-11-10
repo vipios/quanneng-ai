@@ -164,13 +164,44 @@ struct ChatToolbarHost<Title: View, Trailing: View>: View, Equatable {
     @ViewBuilder let title: () -> Title
     @ViewBuilder let trailing: () -> Trailing
 
+    /// [R43-左上角] 左上角「三横 → 开抽屉」的动作。
+    ///
+    /// 用闭包而不是在这里 `@EnvironmentObject` 取 DrawerState：
+    /// `ChatToolbarHost` 被 `.equatable()` 包着，`@EnvironmentObject` 的
+    /// 缺失会让 iPad 分栏那条路径**直接崩**（那边根本没有 DrawerContainer，
+    /// 环境里也就没有 DrawerState，@EnvironmentObject 是强制解包语义）。
+    /// 由调用方读环境、判完有无再传闭包，nil 就不画这个按钮 ——
+    /// 干净的降级，不会出现一个点了没反应的图标。
+    var onOpenDrawer: (() -> Void)? = nil
+
+    /// [R43-左上角书本] 左上角第二个按钮：**替换系统返回箭头**，功能不变。
+    ///
+    /// 这是「换图标」不是「砍功能」—— 点了照样回上一级，和原来的 ‹ 一样。
+    /// 系统返回键的图标由 UIKit 绘制，改不了字形也挪不动位置，所以只能
+    /// 隐藏它、在我们自己的 Button 里放书本图标，行为照旧走 pop。
+    ///
+    /// nil = 这条路径不该接管返回（iPad 分栏没有「上一级」），
+    /// 那就保持系统原样，不隐藏、不替换。
+    var onBack: (() -> Void)? = nil
+
     static func == (lhs: Self, rhs: Self) -> Bool {
-        let eq = lhs.key == rhs.key && lhs.showsTrailing == rhs.showsTrailing
+        // [R43-左上角] 「有没有那两颗按钮」必须参与相等性判断。
+        //
+        // 闭包本身没法比（每次 body 都重建），但**有无**是稳定的布尔量。
+        // 漏掉这一项会出一个很难查的 bug：从「没有抽屉的路径」切到
+        // 「有抽屉的路径」时（或者反过来），`==` 说没变，host 就不重建，
+        // 左上角那颗三横该出现却没出现 —— 而且只在特定路径下复现。
+        let eq = lhs.key == rhs.key
+            && lhs.showsTrailing == rhs.showsTrailing
+            && (lhs.onOpenDrawer == nil) == (rhs.onOpenDrawer == nil)
+            && (lhs.onBack == nil) == (rhs.onBack == nil)
         #if DEBUG
         if !eq {
             // Name the exact field that broke equality so a false-negative
             // key can be pinned from device logs.
             var diffs: [String] = []
+            if (lhs.onOpenDrawer == nil) != (rhs.onOpenDrawer == nil) { diffs.append("hasDrawer") }
+            if (lhs.onBack == nil) != (rhs.onBack == nil) { diffs.append("hasBack") }
             if lhs.key.navTitle != rhs.key.navTitle {
                 let l = lhs.key.navTitle, r = rhs.key.navTitle
                 if l.sessionTitle != r.sessionTitle { diffs.append("sessionTitle") }
@@ -217,6 +248,38 @@ struct ChatToolbarHost<Title: View, Trailing: View>: View, Equatable {
             .frame(width: 0, height: 0)
             .allowsHitTesting(false)
             .toolbar {
+                // [R43-左上角] 最左边「三横」开抽屉。
+                // 位置由 placement 决定，跟声明顺序无关。
+                if let onOpenDrawer {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button(action: onOpenDrawer) {
+                            Image(systemName: "line.3.horizontal")
+                                .font(.system(size: 17, weight: .semibold))
+                        }
+                        // 抽屉展开走自定义手势 + 动画，不是系统 push，
+                        // accessibility 不能沿用「返回」语义。
+                        .accessibilityLabel(AppLocalized("对话列表"))
+                    }
+                }
+                // [R43-左上角书本] 替换系统返回箭头，功能完全不变。
+                //
+                // 排在三横之后，所以它在原来 ‹ 的位置偏右一点点；
+                // 再补 6pt 就是用户要的「往右移动一些」。
+                //
+                // `onBack` 为 nil 时整块不出现，系统箭头照旧 —— iPad 分栏
+                // 那条路径就靠这个保持原样。
+                if let onBack {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button(action: onBack) {
+                            Image(systemName: "book.fill")
+                                .font(.system(size: 17, weight: .semibold))
+                        }
+                        .padding(.leading, 6)
+                        // 语义仍是「返回」，只是图形换了 —— 旁白念出来的
+                        // 应该还是返回，不能让用户以为这是个「打开书本」。
+                        .accessibilityLabel(AppLocalized("Back"))
+                    }
+                }
                 ToolbarItem(placement: .principal) { title() }
                 if showsTrailing {
                     ToolbarItem(placement: .topBarTrailing) { trailing() }

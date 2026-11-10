@@ -126,7 +126,7 @@ struct GitHubAccountView: View {
     /// 带上 scopes 参数，GitHub 会把对应权限预先勾好 ——
     /// 用户少一次「该勾哪几个」的判断，也就少一次因为漏勾而 403。
     private var buildTokenURL: String {
-        "https://github.com/settings/tokens/new?scopes=repo,workflow&description=Minis"
+        "https://github.com/settings/tokens/new?scopes=repo,workflow&description=全能AI"
     }
 
     private func submitSecret() {
