@@ -624,7 +624,7 @@ jobs:
 
           # —— 0) 剥掉所有残留签名（必须在打包之前）——
           #
-          # 为什么非做不可：真正让用户闪退的就是这个。
+          # 为什么非做不可：
           #
           # 我们用 CODE_SIGNING_ALLOWED=NO 编，所以主程序 Minis 和三个
           # appex（AgentWidget / MinisFileProvider / MinisShare）是**裸的**，
@@ -644,21 +644,18 @@ jobs:
           #   · 若它强制全签但漏掉 appex → 三个 appex 的 bundle id 都是
           #     com.vipios.app.*，必须与主 app 同一 team，漏一个也闪退。
           #
-          # 正确做法不是去猜工具的行为，而是把包做成**真正干净**的：
-          # 把所有 Mach-O 的签名全部剥掉，产出一个「零签名」包，
-          # 让自签工具从头到尾统一签一遍。这样它没有可跳过的东西。
-          #
           # 做法：
           #   1. 找出 .app 里所有 Mach-O（file 命令判 "Mach-O"）
           #   2. 用 codesign --remove-signature 剥离
           #   3. 删掉所有 _CodeSignature 目录（里面是 CodeResources，
           #      留着会让部分工具以为还有旧签名）
+          # 然后由下面第 0.5 段统一重签（带 entitlements）。
           #
           # 关于第 2 步为什么不直接无条件调用：
           # codesign --remove-signature 对**本来就裸的**二进制行为不稳 ——
           # 某些版本会报 "code object is not signed at all" 并以非零退出。
           # 所以先用 `codesign -d --verbose=2` 判一次到底有没有签名，
-          # 真的带了 blast 才剥，避免把没签的也走一遍导致误判。
+          # 真的带了才剥，避免把没签的也走一遍导致误判。
           #
           # 判据用 -d（display）而不是 --verify：
           # --verify 会顺带校验资源封印，剥离前后都可能因为 CodeResources
@@ -733,22 +730,187 @@ jobs:
           fi
           echo "  复核通过：包内已无任何签名"
 
-          # —— 1) 未签名 .app（TrollStore / 自签工具直接吃）——
-          ditto -c -k --sequesterRsrc --keepParent "$APP" "out/${BASE}-unsigned.zip"
+          # —— 0.5) 写回 entitlements：ad-hoc 重签每个可执行体 ——
+          #
+          # 这一步是闪退的真正修复。
+          #
+          # 背景：App Group 能力由 entitlements 里的
+          #   com.apple.security.application-groups = [group.com.vipios.app]
+          # 授予。CI 用 CODE_SIGNING_ALLOWED=NO + CODE_SIGN_ENTITLEMENTS=""
+          # 编出来的裸二进制里**没有**这份 entitlement，于是运行时
+          #
+          #   FileManager.containerURL(forSecurityApplicationGroupIdentifier:)
+          #
+          # 返回 nil。代码里有四处对它 `!` 解包，其中
+          # AIChatViewModel.minisAppGroupRoot 在 MinisApp.init() 的启动路径上
+          # 被 SoulStore.refreshCache() 同步调用 —— 于是「拿不到 App Group」
+          # 等价于「点开就闪退」：
+          #
+          #   EXC_BREAKPOINT · SIGTRAP · Trace/BPT trap: 5
+          #   MinisApp.init() → SoulStore.refreshCache()
+          #     → minisMemoryPersistentDir.getter
+          #     → minisAppGroupRoot.getter        ← brk #1
+          #
+          # 作者从没遇到，因为他用正式证书签名，entitlement 一直在。
+          #
+          # 修法：用 ad-hoc 签名（--sign -）把 entitlement 写回每个可执行体。
+          #   · ad-hoc 不需要证书、不需要 provisioning profile，macOS 原生支持
+          #   · 每个 target 用它自己那份 .entitlements，不能混用：
+          #     主 app 的还有 healthkit / nfc / icloud 等，appex 的只有自己的
+          #   · TrollStore（含 Lite）安装时会**保留**二进制上已有的
+          #     entitlements，所以写进去就能生效；越狱设备的 amfid 校验
+          #     已绕过，不会因签名链不完整而拒绝启动
+          #
+          # 顺序：先签 appex，再签主 app。codesign 对 .app 会顺带校验内部
+          # 嵌套的签名，反过来的话签完 appex 主 app 的封印又失效了。
+          echo "== 写入 entitlements（ad-hoc 重签）=="
+          ENT_OK=0
+          ENT_FAIL=0
+
+          # 小工具：签一个目标，成功返回 0。
+          #
+          # 为什么不写成 `if codesign ... | sed ...; then`：
+          # 那样 if 判的是**管道最后一个命令**（sed）的退出码。
+          # sed 永远成功，于是 codesign 失败也会被当成成功，
+          # ENT_FAIL 永远不涨 —— 复核形同虚设。踩过这个坑，所以显式落变量。
+          sign_one() {
+            local target="$1" ent="$2" out rc
+            if [ -n "$ent" ]; then
+              out=$(/usr/bin/codesign --force --sign - --timestamp=none \
+                      --entitlements "$ent" "$target" 2>&1)
+            else
+              out=$(/usr/bin/codesign --force --sign - --timestamp=none \
+                      "$target" 2>&1)
+            fi
+            rc=$?
+            [ -n "$out" ] && printf '%s\n' "$out" | sed 's/^/    /'
+            return $rc
+          }
+
+          # (a) 先签 Frameworks 里的二进制（不带 entitlements）。
+          #     它们被剥离后是裸的，而 ad-hoc 签主 app 包时 codesign 会
+          #     校验嵌套代码；framework 不先签好，主包会报
+          #     "code object is not signed at all"。
+          echo "  -- Frameworks --"
+          FW_OK=0
+          FW_FAIL=0
+          if [ -d "$APP/Frameworks" ]; then
+            while IFS= read -r fw; do
+              [ -n "$fw" ] || continue
+              # framework 目录里有同名可执行体，签目录即可（会带上 Info.plist 封印）
+              if sign_one "$fw" ""; then
+                FW_OK=$((FW_OK + 1))
+              else
+                FW_FAIL=$((FW_FAIL + 1))
+                echo "  ! framework 签名失败: $(basename "$fw")"
+              fi
+            done < <(find "$APP/Frameworks" -maxdepth 1 -name "*.framework" -type d 2>/dev/null | sort)
+            # 散落的 .dylib（有些 SPM 产物是裸 dylib 而不是 framework）
+            while IFS= read -r dy; do
+              [ -n "$dy" ] || continue
+              if sign_one "$dy" ""; then
+                FW_OK=$((FW_OK + 1))
+              else
+                FW_FAIL=$((FW_FAIL + 1))
+                echo "  ! dylib 签名失败: $(basename "$dy")"
+              fi
+            done < <(find "$APP/Frameworks" -maxdepth 1 -name "*.dylib" -type f 2>/dev/null | sort)
+          fi
+          echo "  Frameworks: 成功 $FW_OK · 失败 $FW_FAIL"
+
+          # (b) 三个 appex：各自用自己那份 entitlements。
+          #     必须各自签自己的 —— 主 app 的 entitlements 里有 healthkit /
+          #     nfc / icloud，套到 appex 上会被系统拒绝。
+          echo "  -- App Extensions --"
+          while IFS='|' read -r rel ent; do
+            [ -n "$rel" ] || continue
+            target="$APP/$rel"
+            if [ ! -d "$target" ]; then
+              echo "  ! 不存在，跳过: $rel"
+              ENT_FAIL=$((ENT_FAIL + 1))
+              continue
+            fi
+            if [ ! -f "$ent" ]; then
+              echo "::error::entitlements 文件不存在: $ent（工程配置变了？）"
+              ENT_FAIL=$((ENT_FAIL + 1))
+              continue
+            fi
+            if sign_one "$target" "$ent"; then
+              ENT_OK=$((ENT_OK + 1))
+              echo "  + 已签 $rel"
+            else
+              ENT_FAIL=$((ENT_FAIL + 1))
+              echo "  ! 签名失败 $rel"
+            fi
+          done <<'ENTMAP'
+          PlugIns/AgentWidgetExtension.appex|src/ios/AgentWidget/AgentWidget.entitlements
+          PlugIns/MinisFileProvider.appex|src/ios/FileProvider/FileProvider.entitlements
+          PlugIns/MinisShare.appex|src/ios/ShareExtension/ShareExtension.entitlements
+          ENTMAP
+
+          # (c) 最后签主 app **包**（不是只签可执行文件）。
+          #     签目录才会生成 _CodeSignature/CodeResources 并封印资源；
+          #     只签裸可执行体的话，包是半成品，某些工具会认为它损坏。
+          #     顺序必须在 appex 之后：主包会校验内部嵌套代码。
+          if [ -f "src/ios/Minis.entitlements" ]; then
+            if sign_one "$APP" "src/ios/Minis.entitlements"; then
+              ENT_OK=$((ENT_OK + 1))
+              echo "  + 已签 $BASE.app（主包）"
+            else
+              ENT_FAIL=$((ENT_FAIL + 1))
+              echo "  ! 主包签名失败"
+            fi
+          else
+            echo "::error::src/ios/Minis.entitlements 不存在"
+            ENT_FAIL=$((ENT_FAIL + 1))
+          fi
+
+          echo "  签名成功 $ENT_OK 个 · 失败 $ENT_FAIL 个 · framework 失败 $FW_FAIL 个"
+
+          # 复核：主程序与三个 appex 必须真的带上 App Group。
+          # 只查「有签名」不够 —— 签名成功但 entitlements 没进去
+          # 才是最难查的那种，装到机器上照样闪退。
+          echo "== 复核 entitlements =="
+          ENT_MISSING=0
+          for rel in "$BASE.app" "PlugIns/AgentWidgetExtension.appex" \
+                     "PlugIns/MinisFileProvider.appex" "PlugIns/MinisShare.appex"; do
+            t="$APP/$rel"
+            [ -e "$t" ] || continue
+            dump=$(/usr/bin/codesign -d --entitlements :- "$t" 2>/dev/null || true)
+            case "$dump" in
+              *group.com.vipios.app*)
+                echo "  OK   $rel 带 group.com.vipios.app"
+                ;;
+              *)
+                echo "  !!   $rel 没有 App Group entitlement"
+                ENT_MISSING=$((ENT_MISSING + 1))
+                ;;
+            esac
+          done
+
+          if [ "$ENT_FAIL" != "0" ] || [ "$ENT_MISSING" != "0" ]; then
+            echo "::error::entitlements 写入不完整（签名失败 $ENT_FAIL · 缺 App Group $ENT_MISSING 个）"
+            echo "::error::这种包装到越狱机上仍会闪退 —— 不是可接受的结果"
+            exit 1
+          fi
+          echo "  复核通过：主程序与三个 appex 全部带 group.com.vipios.app"
+
+          # —— 1) 已签 .app（TrollStore / 越狱机直接吃）——
+          ditto -c -k --sequesterRsrc --keepParent "$APP" "out/${BASE}.zip"
 
           # —— 2) .ipa：Payload/<App>.app 的 zip，ipa 就这个结构 ——
-          # 未签名的 ipa 不能直装，但自签工具（Sideloadly / AltStore / ESign）
-          # 和 TrollStore 都认这个形态，比自己把 zip 改后缀靠谱。
+          # 这个 ipa 里已经带 ad-hoc 签名 + App Group entitlements，
+          # TrollStore / TrollStore Lite 装进去会保留 entitlements。
           IPA_DIR=$(mktemp -d)
           mkdir -p "$IPA_DIR/Payload"
           cp -R "$APP" "$IPA_DIR/Payload/"
-          IPA_NAME="${BASE}-${SHORT_VER}-unsigned.ipa"
+          IPA_NAME="${BASE}-${SHORT_VER}.ipa"
           ( cd "$IPA_DIR" && zip -qry "$OLDPWD/out/$IPA_NAME" Payload )
           rm -rf "$IPA_DIR"
           echo "ipa: out/$IPA_NAME"
 
           # —— 3) 关键校验：确认打出来的确实是共存版 ——
-          echo "signed        = no (CODE_SIGNING_ALLOWED=NO + 残留签名已剥离)" > out/BUILD-INFO.txt
+          echo "signed        = ad-hoc（已写入 App Group entitlements）" > out/BUILD-INFO.txt
           {
             echo "app          = $BASE"
             echo "display-name = $DISPLAY_NAME"
@@ -761,10 +923,12 @@ jobs:
             echo "run          = ${{ github.run_number }}"
             echo "note         = ${{ inputs.note }}"
             echo ""
-            echo "# 签名状态：这个包里所有 Mach-O 都是裸的（含 SPM framework）。"
-            echo "# 自签工具必须静默重签，不能跳过任何一个。"
+            echo "# 装法：越狱机用 TrollStore / TrollStore Lite 直接装这个 ipa。"
+            echo "# entitlements 已写进二进制，TrollStore 安装时保留，不需再签。"
             echo "sig-stripped = $STRIPPED 个（剥离前带签名 $SIGNED_BEFORE 个）"
             echo "sig-residual = 0（已复核）"
+            echo "app-group    = group.com.vipios.app（主程序 + 3 appex 均已写入）"
+            echo "re-signed    = $ENT_OK 个可执行体 ad-hoc 重签"
             echo "codesig-dirs = $CS_DIRS 个已删除"
             echo "nested-macho  = 主程序 + 3 appex + 8 SPM framework，共 12 个，全部裸签"
           } >> out/BUILD-INFO.txt
