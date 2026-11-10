@@ -402,6 +402,7 @@
 		E5N0000012F3B941A00049557 /* SkillStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5N0000112F3B941A00049557 /* SkillStore.swift */; };
 		E5N0000022F3B941A00049557 /* SessionSkillsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5N0000122F3B941A00049557 /* SessionSkillsView.swift */; };
 		E5N0000032F3B941A00049557 /* SkillsManagementView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5N0000132F3B941A00049557 /* SkillsManagementView.swift */; };
+		E5CA00000000000000000001 /* SkillsCatalogView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5CB00000000000000000001 /* SkillsCatalogView.swift */; };
 		E5N0000042F3B941A00049557 /* MemoryManagementView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5N0000142F3B941A00049557 /* MemoryManagementView.swift */; };
 		E5N0000052F3B941A00049557 /* SessionMemoryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5N0000152F3B941A00049557 /* SessionMemoryView.swift */; };
 		E5N0000062F3B941A00049557 /* AlarmListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5N0000162F3B941A00049557 /* AlarmListView.swift */; };
@@ -647,6 +648,8 @@
 		FD2A00000000000000000004 /* ContentView+Drawer.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD1A00000000000000000004 /* ContentView+Drawer.swift */; };
 		FF2A00000000000000000001 /* RouteEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF1A00000000000000000001 /* RouteEngine.swift */; };
 		FF2A00000000000000000002 /* RouteRules.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF1A00000000000000000002 /* RouteRules.swift */; };
+		E5CA00000000000000000003 /* PersonaBodies.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5CB00000000000000000003 /* PersonaBodies.swift */; };
+		E5CA00000000000000000002 /* RouteCatalogData.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5CB00000000000000000002 /* RouteCatalogData.swift */; };
 		FF2A00000000000000000003 /* RouteInjector.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF1A00000000000000000003 /* RouteInjector.swift */; };
 /* End PBXBuildFile section */
 
@@ -1254,6 +1257,7 @@
 		E5N0000112F3B941A00049557 /* SkillStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkillStore.swift; sourceTree = "<group>"; };
 		E5N0000122F3B941A00049557 /* SessionSkillsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionSkillsView.swift; sourceTree = "<group>"; };
 		E5N0000132F3B941A00049557 /* SkillsManagementView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkillsManagementView.swift; sourceTree = "<group>"; };
+		E5CB00000000000000000001 /* SkillsCatalogView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkillsCatalogView.swift; sourceTree = "<group>"; };
 		E5N0000142F3B941A00049557 /* MemoryManagementView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MemoryManagementView.swift; sourceTree = "<group>"; };
 		E5N0000152F3B941A00049557 /* SessionMemoryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionMemoryView.swift; sourceTree = "<group>"; };
 		E5N0000162F3B941A00049557 /* AlarmListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AlarmListView.swift; sourceTree = "<group>"; };
@@ -1498,6 +1502,8 @@
 		FD1A00000000000000000004 /* ContentView+Drawer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ContentView+Drawer.swift"; sourceTree = "<group>"; };
 		FF1A00000000000000000001 /* RouteEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RouteEngine.swift; sourceTree = "<group>"; };
 		FF1A00000000000000000002 /* RouteRules.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RouteRules.swift; sourceTree = "<group>"; };
+		E5CB00000000000000000003 /* PersonaBodies.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PersonaBodies.swift; sourceTree = "<group>"; };
+		E5CB00000000000000000002 /* RouteCatalogData.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RouteCatalogData.swift; sourceTree = "<group>"; };
 		FF1A00000000000000000003 /* RouteInjector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RouteInjector.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -2804,6 +2810,7 @@
 			isa = PBXGroup;
 			children = (
 				E5N0000132F3B941A00049557 /* SkillsManagementView.swift */,
+				E5CB00000000000000000001 /* SkillsCatalogView.swift */,
 				FF1A000000000000000000FF /* Domain */,
 			);
 			path = Skills;
@@ -2815,6 +2822,8 @@
 			children = (
 				FF1A00000000000000000001 /* RouteEngine.swift */,
 				FF1A00000000000000000002 /* RouteRules.swift */,
+				E5CB00000000000000000003 /* PersonaBodies.swift */,
+				E5CB00000000000000000002 /* RouteCatalogData.swift */,
 				FF1A00000000000000000003 /* RouteInjector.swift */,
 			);
 			path = Domain;
@@ -3214,6 +3223,8 @@
 			files = (
 				FF2A00000000000000000001 /* RouteEngine.swift in Sources */,
 				FF2A00000000000000000002 /* RouteRules.swift in Sources */,
+				E5CA00000000000000000003 /* PersonaBodies.swift in Sources */,
+				E5CA00000000000000000002 /* RouteCatalogData.swift in Sources */,
 				FF2A00000000000000000003 /* RouteInjector.swift in Sources */,
 				FD2A00000000000000000001 /* EdgeDrawer.swift in Sources */,
 				FD2A00000000000000000005 /* TemplateUIView.swift in Sources */,
@@ -3620,6 +3631,7 @@
 				F1CPSHEETB /* CopilotDeviceLoginSheet.swift in Sources */,
 				E5N0000022F3B941A00049557 /* SessionSkillsView.swift in Sources */,
 				E5N0000032F3B941A00049557 /* SkillsManagementView.swift in Sources */,
+				E5CA00000000000000000001 /* SkillsCatalogView.swift in Sources */,
 				F1VMCPB1 /* MCPIntegrationsView.swift in Sources */,
 				F1VMCPB2 /* MCPFormSheet.swift in Sources */,
 				F1VMCPB3 /* MCPJSONImportSheet.swift in Sources */,

@@ -290,7 +290,7 @@ enum RoutePersona {
         "omega": "CTF强攻",
         "codex": "轻量编码",
         "s": "规则路由",
-        "sandbox": "沙盒隔离",
+        "sandbox": "沙箱执行",
         "omni": "全能执行",
         "auto": "自动",
     ]
@@ -308,49 +308,10 @@ enum RouteMode {
         "rev": "逆向专家模式",
         "sec": "安全研究模式",
         "game": "游戏修改模式",
-        "inject": "注入模式",
+        "inject": "注入兼容模式",
     ]
 
     static func name(_ id: String) -> String { names[id] ?? id }
-}
-
-/// 用户在设置里手动指定的说话模式。
-///
-/// `auto` = 不干预，完全跟随自动判定 —— 这也是出厂值，所以老用户
-/// 升级上来行为一模一样，不会被这次改动悄悄改掉说话风格。
-///
-/// 为什么要这个开关：自动判定是按「能力域」给默认模式的（逆向域给
-/// 逆向专家模式、Web 域给安全研究模式）。用户偶尔会想在同一件事上
-/// 换口径 —— 比如写检查脚本时想让模型话少一点，判成 Web 域却想用
-/// 简洁模式。以前只能改词表，现在一行设置就够。
-enum RouteModePref {
-
-    /// 键名叫 route.modeOverride 而不是 route.mode：后者太泛，
-    /// 以后别的地方加个 mode 就容易撞上。
-    private static let key = "route.modeOverride"
-
-    /// 手动选项。`auto` 排第一，表示默认行为。
-    static let all: [String] = ["auto", "plain", "dev", "rev", "sec", "game", "inject"]
-
-    static var current: String {
-        let v = UserDefaults.standard.string(forKey: key) ?? "auto"
-        // 存进去的值可能是旧版本删掉的 id，落回 auto 而不是把一个
-        // 谁都不认识的字串传下去 —— 那会让判定条显示一个原始英文 id。
-        return all.contains(v) ? v : "auto"
-    }
-
-    static func set(_ id: String) {
-        if id == "auto" {
-            UserDefaults.standard.removeObject(forKey: key)
-        } else {
-            UserDefaults.standard.set(id, forKey: key)
-        }
-    }
-
-    /// 显示名。`auto` 单独说明 —— 它不是一种模式，是「不干预」。
-    static func label(_ id: String) -> String {
-        id == "auto" ? "自动（跟随判定）" : RouteMode.name(id)
-    }
 }
 
 // MARK: - 设备档位（R31 §4）

@@ -1308,7 +1308,10 @@ struct TypingIndicator: View {
         // duplicate here was redundant. ThinkingLevelSheetView is unchanged;
         // it's still presented from the nav-bar badge.
         HStack(spacing: 0) {
-            Text("\(soulName) is thinking")
+            // [R45-全中文化] 原来是硬编码英文「\(name) is thinking」，改成
+            // 走翻译表：「%@ 正在思考」。名字来自 Soul 人格（已随 R45 名称
+            // 迁移把旧默认名 Minis 换成 全能AI）。
+            Text(String(format: AppLocalized("%@ is thinking"), soulName))
             ForEach(0..<3, id: \.self) { i in
                 Text(".")
                     .offset(y: dotOffsets[i] ? -3 : 1)

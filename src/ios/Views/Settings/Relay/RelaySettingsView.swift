@@ -99,7 +99,7 @@ struct RelaySettingsView: View {
                 Text("直连")
                     .font(.caption)
                     .foregroundColor(.secondary)
-                TextField("直连地址", text: $homeHost)
+                TextField("例如 192.168.x.x", text: $homeHost)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                     .keyboardType(.URL)
@@ -108,10 +108,10 @@ struct RelaySettingsView: View {
             .padding(.vertical, 2)
 
             VStack(alignment: .leading, spacing: 6) {
-                Text("在外用的域名")
+                Text("外网域名")
                     .font(.caption)
                     .foregroundColor(.secondary)
-                TextField("example.dpdns.org", text: $awayHost)
+                TextField("例如 your-name.dpdns.org", text: $awayHost)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                     .keyboardType(.URL)
@@ -120,8 +120,6 @@ struct RelaySettingsView: View {
             .padding(.vertical, 2)
         } header: {
             Text("线路")
-        } footer: {
-            Text("App 会打 http://\(RelayVault.cleanHost(homeHost))/health，通了就是在家里走直连，不通就走域名。两个都只填主机名，**不用填端口**（直连固定 8080、域名走 443）。")
         }
     }
 
@@ -136,13 +134,8 @@ struct RelaySettingsView: View {
                     Image(systemName: "checkmark.seal.fill")
                         .font(.system(size: 15))
                         .foregroundColor(.green)
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text("密码已记住")
-                            .font(.subheadline.weight(.medium))
-                        Text("以后进后台、重启设备都不会再问你")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
+                    Text("密码已记住")
+                        .font(.subheadline.weight(.medium))
                     Spacer()
                 }
                 .padding(.vertical, 2)
@@ -218,10 +211,6 @@ struct RelaySettingsView: View {
             if !saveError.isEmpty {
                 Text(saveError)
                     .foregroundColor(.red)
-            } else {
-                Text(remembered
-                     ? "密码用 AES-GCM 加密后只存在这台手机上。进后台、重启中转站、重启路由器都直接用它，不会再让你输入。"
-                     : "只需输入这一次。存好之后进后台、重启设备都不会再问你。")
             }
         }
     }
@@ -265,8 +254,6 @@ struct RelaySettingsView: View {
                 .autocorrectionDisabled()
         } header: {
             Text("路由器指令密钥")
-        } footer: {
-            Text("airboot 的 k 参数。历史配置里通常与后台密码相同，留空就用后台密码。只有两者不同时才需要单独填。")
         }
     }
 
@@ -285,8 +272,6 @@ struct RelaySettingsView: View {
                 .autocorrectionDisabled()
         } header: {
             Text("路由器型号")
-        } footer: {
-            Text("只显示在路由器页顶部，不参与任何判断。留空就显示「未配置」。")
         }
     }
 
@@ -363,8 +348,6 @@ struct RelaySettingsView: View {
             }
         } header: {
             Text("诊断")
-        } footer: {
-            Text("判定失败、走错线路时，先看这里。日志只记录探测地址与结果，不包含密码。")
         }
     }
 
@@ -560,8 +543,8 @@ struct RelayQuickSetupForm: View {
                 Spacer(minLength: 0)
             }
 
-            field("直连地址（在家用）", "192.168.1.88", $home)
-            field("外网地址（在外面用）", "example.dpdns.org", $wan)
+            field("直连地址", "例如 192.168.x.x", $home)
+            field("外网地址", "例如 your-name.dpdns.org", $wan)
 
             VStack(alignment: .leading, spacing: 6) {
                 Text("后台密码")
@@ -596,11 +579,6 @@ struct RelayQuickSetupForm: View {
                     .foregroundColor(ok ? .green : .orange)
                     .fixedSize(horizontal: false, vertical: true)
             }
-
-            Text("只填主机名，不用填端口：直连固定 8080，外网走 443。填过之后地址和密码都记住，要换随时回来改。")
-                .font(.caption2)
-                .foregroundColor(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
         }
         .padding(16)
         .background(Color(.secondarySystemGroupedBackground))

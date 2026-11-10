@@ -1,14 +1,14 @@
 //
 //  SettingsRename.swift
-//  Minis — 设置页每行的「长按改名」
+//  Minis — 设置页每行的「左滑改名」
 //
-//  需求（用户口径）：这个界面所有的字体都添加一个长按弹窗，里面可以
+//  需求（用户口径）：这个界面所有的字体都添加一个左滑弹窗，里面可以
 //  改名字、恢复名字、取消。
 //
 //  设计取舍，逐条记下来，免得后面有人问「为什么这么写」：
 //
 //  1. 只改「显示名」，不动功能。
-//     长按改名改的是用户在设置页看到的文字，`NavigationLink` 的目标、
+//     左滑改名改的是用户在设置页看到的文字，`NavigationLink` 的目标、
 //     tool id、UserDefaults 的键全都不变。否则改个标题就能把功能改坏。
 //
 //  2. 名字落在 UserDefaults，键 = `minis.settings.rowName.<rowId>`。
@@ -24,9 +24,11 @@
 //     用户清空输入框再点保存，本意就是「不要这个自定义名了」，
 //     不该存一个空标题上去。
 //
-//  5. 长按不拦截点击。
-//     用 `.simultaneousGesture(LongPressGesture())` 而不是
-//     `.onLongPressGesture`：后者会吃掉手势，导致轻点跳转失灵。
+//  5. 左滑不拦截点击、不抢滚动。
+//     用 `.simultaneousGesture(DragGesture(minimumDistance:30))` + 方向判定：
+//     simultaneous 允许多个手势同时识别（轻点跳转、竖向滚动、左滑改名
+//     三者并存）；minimumDistance 给 ScrollView 的滚动手势一个「起步空间」，
+//     onEnded 里判方向，竖向立即放弃，不抢滚动。
 //
 
 import SwiftUI
@@ -177,9 +179,9 @@ extension Notification.Name {
     static let settingsRowNameChanged = Notification.Name("minis.settings.rowNameChanged")
 }
 
-// MARK: - 长按弹窗
+// MARK: - 左滑弹窗
 
-/// 长按某一行后弹出来的东西：改名 / 恢复原名 / 取消。
+/// 左滑某一行后弹出来的东西：改名 / 恢复原名 / 取消。
 ///
 /// 为什么不用 `.alert`：
 ///   · alert 里塞 TextField 是 iOS 16 之后才有，且样式被系统锁死，
@@ -293,11 +295,18 @@ struct SettingsRowRenameSheet: View {
 
 // MARK: - 挂载修饰符
 
-/// 给一行加上「长按改名」。
+/// 给一行加上「左滑改名」。
 ///
-/// 用 `.simultaneousGesture` 而不是 `.onLongPressGesture`：
-/// 后者会把手势从 NavigationLink 手里抢走，轻点就不跳转了。
-/// `simultaneousGesture` 允许多个手势同时识别，长按和轻点互不影响。
+/// 手势用 SwiftUI 的 `DragGesture` 挂在行上，但必须配合**方向判定**才能
+/// 不抢设置页的竖向滚动：
+///   · `simultaneousGesture`（而不是 `gesture`/`highPriorityGesture`）
+///     让左滑和 NavigationLink 的轻点、ScrollView 的滚动三者并存；
+///   · `onEnded` 里判方向，只有「横向位移明显大于竖向、且向左」才触发，
+///     竖向滚动（翻设置页）不产生任何副作用；
+///   · `minimumDistance` 给到 30pt，让 ScrollView 的滚动手势先起步，
+///     竖向拖动时 DragGesture 很难被触发，滚动手感基本不受影响。
+///   （设置页是 ScrollView + 自绘卡片，`swipeActions` 只在 List 里有效，
+///    所以这里只能自己挂手势。）
 extension View {
 
     /// - Parameters:
@@ -320,11 +329,13 @@ private struct SettingsRowRenameModifier: ViewModifier {
 
     func body(content: Content) -> some View {
         content
-            // 长按：同时识别，不抢轻点
             .simultaneousGesture(
-                LongPressGesture(minimumDuration: 0.45)
-                    .onEnded { _ in
-                        // 长按成功给一下触感，让用户知道「按到了」
+                DragGesture(minimumDistance: 30)
+                    .onEnded { value in
+                        let dx = value.translation.width
+                        let dy = value.translation.height
+                        // 只认「明显向左、且横向占主导」的滑动。
+                        guard dx < -44, abs(dx) > abs(dy) * 1.4 else { return }
                         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
                         showing = true
                     }

@@ -68,6 +68,7 @@ extension ContentView {
                 // iPhone 走导航栈（currentStackSessionId），iPad 走
                 // selectedSessionId，两个都可能是「当前」，取先有值的那个。
                 currentSessionId: currentStackSessionId ?? selectedSessionId,
+                artifactStore: ArtifactStore.shared,
                 isActive: { sid in sessionIsRunning(sid) },
                 isSuspended: { sid in sidebarConcurrencyManager.isSuspended(sid) },
                 query: $drawerQuery,
@@ -78,7 +79,6 @@ extension ContentView {
                 sessionMatches: drawerSessionMatches,
                 artifactMatches: drawerArtifactMatches,
                 menuActions: menuActions,
-                onOpenAllArtifacts: { showAllArtifacts = true },
                 onNewChat: { handleNewChatRequest() },
                 onOpenSettings: { activeToolSheet = .settings },
                 onSearchChanged: { q in drawerQuery = q }

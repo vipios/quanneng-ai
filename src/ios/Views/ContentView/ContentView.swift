@@ -438,13 +438,6 @@ struct ContentView: View {
     /// 那样会创建第二个 WebView，屏幕上出现两份抽屉。
     @State var templateHost: TemplateUIHost?
 
-    /// 是否弹出「全部产物」。
-    ///
-    /// 不复用 `activeToolSheet`：那是 `ToolSheet` 枚举，加一个 case 就要
-    /// 动它的 switch；而且全部产物需要传 `ArtifactStore` 和 `sessions`，
-    /// 用独立的 `.sheet(isPresented:)` 传参更直白。
-    @State var showAllArtifacts = false
-
     // Search
     @State var showSearchBar = false
     var isSearching: Bool { showSearchBar && !searchText.isEmpty }
@@ -823,12 +816,7 @@ struct ContentView: View {
         // 抽屉「全部产物」入口。数据源用现成的 `ArtifactStore.shared`
         // （扫描 / 分组 / 搜索 / 改名 / 删除都已实现），这一页只做呈现。
         // `onLocate` 把「在对话中定位」接回原版 push 路径。
-        .sheet(isPresented: $showAllArtifacts) {
-            AllArtifactsView(store: ArtifactStore.shared, sessions: sessions) { sessionId, _ in
-                showAllArtifacts = false
-                openSessionFromDrawer(sessionId)
-            }
-        }
+        // [R46-全部产物顶部下拉] 由系统 .sheet 改成顶部下拉面板，对齐 R40 模板。
         .sheet(item: $activeToolSheet) { sheet in
             switch sheet {
             case .settings:

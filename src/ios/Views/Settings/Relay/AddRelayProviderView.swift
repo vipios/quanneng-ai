@@ -40,10 +40,29 @@ struct AddRelayProviderView: View {
     @State private var routeMode: RelayRouteMode = .auto
     @State private var appendV1 = true
 
+    // [R45-直连/在外模型] 两条线路各一个模型。nil = 未选择。
+    @State private var lanModel: String? = nil
+    @State private var wanModel: String? = nil
+
+    // 模型选择弹窗
+    @State private var pickingLine: RelayLine? = nil   // nil = 不弹
+    @State private var fetchingModels = false
+    @State private var modelList: [String] = []
+    @State private var modelFetchError = ""
+    @State private var modelSearch = ""
+
     @State private var testing = false
     @State private var testResult: TestResult?
     @State private var saving = false
     @State private var saveError = ""
+
+    /// 直连 / 在外 两条线路。用于模型选择弹窗区分当前在选哪条。
+    private enum RelayLine: String, Identifiable {
+        case lan
+        case wan
+        var id: String { rawValue }
+        var title: String { self == .lan ? "直连模型" : "在外模型" }
+    }
 
     private enum TestResult: Equatable {
         case homeOK(Double)
@@ -58,6 +77,7 @@ struct AddRelayProviderView: View {
             basicsSection
             addressSection
             keySection
+            modelSection
             modeSection
 
             if let r = testResult {
@@ -91,12 +111,14 @@ struct AddRelayProviderView: View {
                 .disabled(!canSave || saving)
             }
         }
+        .sheet(item: $pickingLine) { line in
+            modelPickerSheet(line)
+        }
         .onAppear {
             // [R42] 不再预填地址。
             //
-            // 原来这里会填 `http://192.168.1.88:8080` 和
-            // `https://xxxx.dpdns.org` —— 那是我自己家的真实内网 IP 和
-            // 域名，随 App 一起发出去，等于把家里的网络结构公开了。
+            // 原来这里会填真实的内网 IP 和域名 —— 那是作者自己家的网络
+            // 结构，随 App 一起发出去，等于把家里的网络公开了。
             // 用户明确要求这两个地址自己填，所以留空。
             //
             // 顺带一个实际问题：预填了真实地址之后，用户不想要也会
@@ -199,6 +221,40 @@ struct AddRelayProviderView: View {
         // [R42] footer 删掉（钥匙串那段说明）。
     }
 
+    // MARK: - 模型（按线路分别指定）
+
+    private var modelSection: some View {
+        Section {
+            modelRow(.lan, value: lanModel)
+            modelRow(.wan, value: wanModel)
+        } header: {
+            Text("模型（按线路分别指定）")
+        } footer: {
+            Text("点右侧箭头从该线路拉取可用模型。在家走内网、在外走域名，各用各的模型；未选的线路回落到另一条已选模型。")
+        }
+    }
+
+    private func modelRow(_ line: RelayLine, value: String?) -> some View {
+        HStack(spacing: 10) {
+            Text(line.title)
+            Spacer()
+            Text(value ?? "未选择")
+                .foregroundColor(value == nil ? .secondary : .primary)
+            Button {
+                Task { await fetchModels(line) }
+            } label: {
+                if fetchingModels {
+                    ProgressView().scaleEffect(0.7)
+                } else {
+                    Image(systemName: "arrow.up.arrow.down.circle")
+                        .foregroundColor(.accentColor)
+                }
+            }
+            .buttonStyle(.borderless)
+            .disabled(fetchingModels)
+        }
+    }
+
     // MARK: - 线路偏好
 
     private var modeSection: some View {
@@ -239,6 +295,191 @@ struct AddRelayProviderView: View {
             Text("线路选择")
         }
         // [R42] footer 删掉（自动判定探活那段说明）。
+    }
+
+    // MARK: - 模型选择弹窗
+
+    /// 点右侧箭头后弹出的模型列表。可搜索、点行即选。
+    private func modelPickerSheet(_ line: RelayLine) -> some View {
+        NavigationStack {
+            VStack(spacing: 0) {
+                if !modelSearch.isEmpty || !modelList.isEmpty {
+                    // 搜索框
+                    HStack(spacing: 6) {
+                        Image(systemName: "magnifyingglass")
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundColor(.secondary)
+                        TextField("搜索模型", text: $modelSearch)
+                            .textFieldStyle(.plain)
+                            .font(.system(size: 15))
+                            .autocorrectionDisabled()
+                            .textInputAutocapitalization(.never)
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(Color(.tertiarySystemFill), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                }
+
+                if modelFetchError.isEmpty {
+                    List(filteredModels, id: \.self) { m in
+                        Button {
+                            if line == .lan { lanModel = m } else { wanModel = m }
+                            pickingLine = nil
+                            modelSearch = ""
+                        } label: {
+                            HStack {
+                                Text(m)
+                                    .font(.system(size: 15))
+                                Spacer()
+                                let cur = line == .lan ? lanModel : wanModel
+                                if m == cur {
+                                    Image(systemName: "checkmark")
+                                        .font(.system(size: 13, weight: .semibold))
+                                        .foregroundColor(.accentColor)
+                                }
+                            }
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .listStyle(.plain)
+                } else {
+                    VStack(spacing: 12) {
+                        Image(systemName: "exclamationmark.triangle")
+                            .font(.system(size: 32, weight: .light))
+                            .foregroundColor(.secondary)
+                        Text("没能获取到模型")
+                            .font(.subheadline.weight(.semibold))
+                        Text(modelFetchError)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 24)
+                        Button("重新获取") {
+                            Task { await fetchModels(line) }
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+            }
+            .navigationTitle(line.title)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("完成") {
+                        pickingLine = nil
+                        modelSearch = ""
+                    }
+                }
+            }
+        }
+    }
+
+    private var filteredModels: [String] {
+        let kw = modelSearch.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !kw.isEmpty else { return modelList }
+        return modelList.filter { $0.lowercased().contains(kw) }
+    }
+
+    /// 向该线路实拉 /v1/models，得到模型 id 列表。
+    ///
+    /// 判据与 `probe` 一致：用中转站自己的地址 + API Key。地址按线路选
+    /// （lan 用内网、wan 用外网），协议处理复用了 OpenAI 的 /v1 规则。
+    private func fetchModels(_ line: RelayLine) async {
+        fetchingModels = true
+        defer { fetchingModels = false }
+
+        let key = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let rawBase = line == .lan ? homeURL : awayURL
+        var base = rawBase.trimmingCharacters(in: .whitespacesAndNewlines)
+        while base.hasSuffix("/") { base.removeLast() }
+        guard !base.isEmpty else {
+            modelList = []
+            modelFetchError = "请先填好该线路的地址。"
+            pickingLine = line
+            return
+        }
+
+        // 拼 /v1/models（OpenAI 兼容）。Anthropic 兼容没有 /models，这里
+        // 也按 OpenAI 的路径拼 —— 若协议是 anthropic，提示暂不支持拉列表。
+        if protocolKind == .anthropic {
+            modelList = []
+            modelFetchError = "Anthropic 兼容协议暂不支持拉取模型列表，请改用 OpenAI 兼容。"
+            pickingLine = line
+            return
+        }
+
+        var candidate: [String] = []
+        if appendV1 {
+            let withV1 = base.hasSuffix("/v1") ? base : base + "/v1"
+            candidate.append(withV1 + "/models")
+            if !base.hasSuffix("/v1") { candidate.append(base + "/models") }
+        } else {
+            candidate.append(base + "/models")
+            if !base.hasSuffix("/v1") { candidate.append(base + "/v1/models") }
+        }
+
+        var list: [String] = []
+        var err = ""
+        for path in candidate {
+            if let got = await fetchModelListOne(path, key: key) {
+                list = got
+                err = ""
+                break
+            }
+        }
+        if list.isEmpty && err.isEmpty {
+            err = "该线路没拉到可用模型。检查地址、端口，或 API Key。"
+        }
+
+        modelList = list.sorted()
+        modelFetchError = err
+        pickingLine = line
+    }
+
+    /// 拉一个具体 /v1/models URL，解析出模型 id 列表。失败返回 nil。
+    private func fetchModelListOne(_ fullURL: String, key: String) async -> [String]? {
+        guard let url = URL(string: fullURL) else { return nil }
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.timeoutIntervalForRequest = 12
+        cfg.waitsForConnectivity = false
+        let session = URLSession(configuration: cfg)
+        defer { session.invalidateAndCancel() }
+
+        let m = NSMutableURLRequest(url: url)
+        m.timeoutInterval = 12
+        m.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+        m.setValue("application/json", forHTTPHeaderField: "Accept")
+        if !key.isEmpty {
+            m.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        }
+
+        guard let (data, resp) = try? await session.data(for: m as URLRequest),
+              let code = (resp as? HTTPURLResponse)?.statusCode,
+              (200...299).contains(code) else { return nil }
+
+        guard let doc = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+            return nil
+        }
+        let raw: [Any]
+        if let d = doc["data"] as? [Any] { raw = d }
+        else if let d = doc["models"] as? [Any] { raw = d }
+        else if let d = doc as? [Any] { raw = d }
+        else { raw = [] }
+
+        var ids: [String] = []
+        for item in raw {
+            if let s = item as? String, !s.isEmpty { ids.append(s) }
+            else if let d = item as? [String: Any],
+                    let id = (d["id"] as? String) ?? (d["name"] as? String), !id.isEmpty {
+                ids.append(id)
+            }
+        }
+        // 去重
+        var seen = Set<String>()
+        return ids.filter { seen.insert($0).inserted }
     }
 
     // MARK: - 测试结果
@@ -404,7 +645,7 @@ struct AddRelayProviderView: View {
         // ⚠️ 必须复用 test() 用的那个 probe，不能另写一套：
         // 早前这里调的是 `RelayProbe.reachableHome(home)`，它直接拼
         // `base + "/models"`，而 relay 的模型列表在 `/v1/models` ——
-        // 用户填 `http://192.168.1.88:8080` 时探的是 `/models`，
+        // 用户填 `http://192.168.x.x:8080` 时探的是 `/models`，
         // 404 → 返回 false → `lastResolvedIsLan = false`。
         // 结果就是：明明在家保存的中转站，被记成「在外」，
         // 之后每次发消息都先走域名绕一圈，白慢 35 倍，直到某次
@@ -421,7 +662,10 @@ struct AddRelayProviderView: View {
             lastResolvedAt: Date(),
             // 档案里也要存一份 —— 将来加「编辑中转站」时靠它回填，
             // 否则每次打开编辑页都显示默认值，用户改都不改就被覆盖掉。
-            appendV1Suffix: instance.appendV1Suffix
+            appendV1Suffix: instance.appendV1Suffix,
+            // [R45-直连/在外模型] 两条线路各自选的模型。
+            lanModel: lanModel,
+            wanModel: wanModel
         )
 
         // 顺序：先写 Key（失败就整单不落），再写档案，最后加实例。

@@ -38,10 +38,14 @@ final class RelayVault {
     private let kRouterKey = "minis.relay.router.key.cipher"
     // 与 kEnabled / enabled 一起删掉的还有一个 "minis.relay.enabled" 键。
 
-    /// 家里中转站的内网地址（默认值来自真机实测，可改）
-    static let defaultHomeHost = "192.168.1.88"
+    /// 家里中转站的内网地址（默认值）。
+    /// ⚠️ 隐私：这里**绝不能**写作者自己的真实地址/域名。ipa 会分发给别人，
+    /// 若把真实内网 IP 或 DDNS 域名硬编码成默认值，任何人装上 App 就会
+    /// 在输入框里看到你的真实地址，且未配置时会直接尝试连你的中转站。
+    /// 所以默认留空 —— 用户自己填。占位提示用「举例」放在界面层。
+    static let defaultHomeHost = ""
     /// 公网域名（Cloudflare 隧道），443 上同时提供 relay 和 airboot
-    static let defaultAwayHost = "lidongyang.dpdns.org"
+    static let defaultAwayHost = ""
 
     // 这里原来有一个 `var enabled: Bool`（读写 `minis.relay.enabled`），
     // 打算做「设置页入口开关」。全仓库没有任何地方读它，属于死代码，

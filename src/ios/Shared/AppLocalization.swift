@@ -92,7 +92,23 @@ func AppLocalized(_ key: StaticString, comment: StaticString? = nil) -> String {
     let bundle = AppBundle.current
     let plain = key.description
     if let hit = LocalizedStringCache.lookup(plain, bundle: bundle) { return hit }
-    let value = String(localized: String.LocalizationValue(plain), bundle: bundle, comment: comment)
+    var value = String(localized: String.LocalizationValue(plain), bundle: bundle, comment: comment)
+    // [R45-改名key回退] 曾经有一次全局改名把源码里以「Minis」开头的本地化 key
+    // 整体换成了「全能AI」，但 Localizable.xcstrings 里的 key 没跟着改。
+    // 结果这些 key 全部查不到，App 原样把英文 key 显示出来（比如输入框
+    // 占位符「全能AI can make the Return key …」）。
+    //
+    // 与其逐个把几十处调用点改回旧 key（容易漏、以后改名还会再犯），
+    // 不如在查不到时做一次回退：把「全能AI」前缀换回「Minis」再查一次。
+    // 命中即用翻译表的对应语言译文（zh-Hans 早已是完整中文）。
+    //
+    // 「查不到」的判定：String(localized:) 对缺失 key 返回 key 本身。
+    // 误判面仅限 en 值恰好等于 key 的情况——那种回退查到的也是同一句，无害。
+    if value == plain, plain.hasPrefix("全能AI") {
+        let legacyKey = "Minis" + plain.dropFirst("全能AI".count)
+        let legacyValue = String(localized: String.LocalizationValue(legacyKey), bundle: bundle, comment: comment)
+        if legacyValue != legacyKey { value = legacyValue }
+    }
     LocalizedStringCache.store(value, for: plain, bundle: bundle)
     return value
 }

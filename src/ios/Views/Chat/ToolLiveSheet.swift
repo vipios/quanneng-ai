@@ -2840,16 +2840,18 @@ struct ToolLiveSheet: View {
     }
 
     private var toolTitle: String {
+        // [R45-全中文化] 这里原来是英文「Minis/全能AI is using Shell」之类，
+        // 没走本地化，中文界面直接露英文。按用户要求全用中文。
         switch block.kind {
-        case .shellTool: return "全能AI is using Shell"
-        case .fileReadTool: return "全能AI is reading File"
-        case .fileWriteTool: return "全能AI is using Editor"
-        case .fileEditTool: return "全能AI is editing File"
-        case .browserTool: return "全能AI is using Browser"
-        case .readImageTool: return "全能AI is reading Image"
-        case .memoryTool: return "全能AI is using Memory"
-        case .delegateTool: return "全能AI is using an Agent"
-        case .userAskTool: return "全能AI is asking you"
+        case .shellTool: return "全能AI 正在使用终端"
+        case .fileReadTool: return "全能AI 正在读取文件"
+        case .fileWriteTool: return "全能AI 正在使用编辑器"
+        case .fileEditTool: return "全能AI 正在编辑文件"
+        case .browserTool: return "全能AI 正在使用浏览器"
+        case .readImageTool: return "全能AI 正在查看图片"
+        case .memoryTool: return "全能AI 正在使用记忆"
+        case .delegateTool: return "全能AI 正在使用智能体"
+        case .userAskTool: return "全能AI 正在向你提问"
         case .info: return "全能AI"
         case .text: return "全能AI"
         case .thinking: return "全能AI"

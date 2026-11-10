@@ -336,6 +336,39 @@ struct RelayAdminView: View {
 
 // MARK: - WKWebView 包装
 
+/// 中转站后台专用的 WKWebView 子类，只做一件事：等 frame 铺满后再加载。
+///
+/// 背景见 RelayWebContainer.makeUIView 的 [R45-首屏半屏] 注释 —— 页面是
+/// NavigationStack push 出来的，首屏 load 时 WKWebView 内部状态（frame /
+/// safeAreaInsets）还没稳定，网页会按错误的 viewport 高度渲染，body 被固定
+/// 成半屏，动画结束也不会长回去。
+///
+/// 这里重写 layoutSubviews，等到 frame 高度「连续两次相同且 > 1pt」（即稳定
+/// 下来）才回调 onFirstLayout，由调用方在那一刻才发 load。
+private final class RelayAdminWebView: WKWebView {
+
+    /// 首次拿到稳定 frame 时回调（只触发一次）。
+    var onFirstLayout: (() -> Void)?
+
+    private var firedFirstLayout = false
+    private var lastLayoutHeight: CGFloat = 0
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        guard !firedFirstLayout else { return }
+
+        let h = bounds.height
+        guard h > 1 else { return }
+        // 高度连续两次一致，才认为布局稳定（push 动画 / safe area 调整结束）
+        if abs(h - lastLayoutHeight) < 0.5 {
+            firedFirstLayout = true
+            onFirstLayout?()
+        } else {
+            lastLayoutHeight = h
+        }
+    }
+}
+
 private struct RelayWebContainer: UIViewRepresentable {
 
     let urlString: String
@@ -362,7 +395,7 @@ private struct RelayWebContainer: UIViewRepresentable {
             }
         }
 
-        let web = WKWebView(frame: .zero, configuration: cfg)
+        let web = RelayAdminWebView(frame: .zero, configuration: cfg)
         web.navigationDelegate = context.coordinator
 
         // ⚠️⚠️ 左滑的关键：**不要接管 scrollView**。
@@ -384,10 +417,34 @@ private struct RelayWebContainer: UIViewRepresentable {
         context.coordinator.lastPassword = password
         context.coordinator.lastToken = reloadToken
 
-        if let url = URL(string: urlString) {
+        // [R45-首屏半屏] 不要在 makeUIView 里立刻 load。
+        //
+        // 这个页面是 NavigationStack push 出来的：push 动画期间 WKWebView 的
+        // frame 还处于中间态（比最终高度矮一截）。此时就 load，网页会按这个
+        // 半屏高度算 viewport、把 body 高度固定住；动画结束 frame 恢复全屏，
+        // 网页却不会跟着长回去 —— 表现就是「第一次进去半屏、退出重进才好」。
+        //
+        // 修法：把首次 load 延迟到 frame 真正铺满之后再发（见
+        // RelayAdminWebView.layoutSubviews 的 onFirstLayout 回调）。第二次进
+        // 因为 frame 一开始就对了，不受影响。
+        let initialURL = urlString
+        web.onFirstLayout = { [weak web] in
+            guard let web = web, let url = URL(string: initialURL) else { return }
             var req = URLRequest(url: url)
             req.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
             web.load(req)
+        }
+        // 兜底：万一 layoutSubviews 没有触发第二次（极端情况下 frame 一次
+        // 到位），0.8s 后强制 load，保证页面一定能出来。onFirstLayout 已触发
+        // 的话这里会因 web.url != nil 而跳过，不会重复加载。
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak web] in
+            guard let web = web else { return }
+            guard web.url == nil, !web.isLoading else { return }
+            if let url = URL(string: initialURL) {
+                var req = URLRequest(url: url)
+                req.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+                web.load(req)
+            }
         }
         return web
     }

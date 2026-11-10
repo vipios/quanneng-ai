@@ -50,22 +50,13 @@ final class DrawerState: ObservableObject {
     /// 从屏幕左边缘起手多少点之内才算「拉抽屉」。
     /// 少了这个阈值，普通左滑返回会变成拉开抽屉。
     ///
-    /// [R41-左滑不灵敏] 24 → 32。
+    /// [R45-左滑仍不灵敏] 32 → 44。
     ///
-    /// 24pt 对拇指来说太苛刻：iPhone 上单手操作时，手指自然落点常在
-    /// 边缘往里 25-40pt 的位置，落在 24 之外就变成「滑了没反应」。
-    /// 用户反馈的「不灵敏」主要就是这一段死区。
-    ///
-    /// 为什么只加到 32 而不是更大：这一层在 ZStack 最上层且
-    /// `point(inside:)` 只在这条带子里返回 true，带子越宽，聊天界面上
-    /// 能被它吃掉触摸的区域就越大 —— 左边缘那一条里的按钮会点不动。
-    /// 32 是「够拇指够到」和「不吃掉内容点击」之间的折中。
-    ///
-    /// 和 ui.html 里 JS 的 40px 起手区不是一回事，两者分工：
-    ///   · Swift 这条带子负责「JS 还没接管时先把手指接住」；
-    ///   · JS 拿到 pointerdown 后自己再看 40px 决定要不要跟手。
-    ///   JS 的判定更宽，所以只要 Swift 接住了，JS 一定也会接 —— 不会互相推诿。
-    static let edgeSlop: CGFloat = 32
+    /// 32pt 仍是窄了：拇指从边缘起手时，自然落点经常落在 30-45pt 区间，
+    /// 落在这条带子之外就变成「滑了没反应」。44pt 覆盖了绝大多数单手握持
+    /// 时拇指能自然够到的范围，同时还没到「吃掉内容点击」的程度 ——
+    /// 聊天页左边缘这条 44pt 里几乎不放可点控件，误伤成本很低。
+    static let edgeSlop: CGFloat = 44
 
     /// 吸附判定：拖过这个比例就往「展开」吸，否则往「收起」吸。
     static let settleThreshold: CGFloat = 0.4
@@ -219,19 +210,27 @@ struct DrawerContainer<Drawer: View, Content: View>: View {
                 .scaleEffect(1 - 0.06 * state.progress * (useTemplate ? 0 : 1),
                              anchor: .trailing)
                 .offset(x: contentShift)
-                .overlay(alignment: .leading) {
-                    // 遮罩：抽屉拉开时挡内容区，同时承担「点空白关闭」。
-                    // 模板模式下这层必须留着 —— 模板自己的 `.scrim` 已经
-                    // 在 App 模式里隐藏了，它是唯一的一层。
-                    if state.progress > 0.02 {
-                        Color.black
-                            .opacity(0.32 * Double(state.progress))
-                            .contentShape(Rectangle())
-                            .onTapGesture { state.close() }
-                            .allowsHitTesting(true)
-                    }
-                }
                 .disabled(state.isOpen)
+
+            // ── 遮罩层（独立，盖满全屏，点任意抽屉外区域关闭）──
+            //
+            // 之前遮罩挂在 content() 的 .overlay 里，跟着 content 一起被
+            // .disabled(state.isOpen) 禁用掉，onTapGesture 收不到点击，
+            // 于是「点抽屉外面收不回抽屉」，只能点抽屉右上角的 xmark。
+            //
+            // 独立成 ZStack 里的一层后：
+            //   · 不受 content 的 disabled 影响，点击永远有效；
+            //   · frame 铺满全屏，抽屉（drawerWidth 内）由抽屉层自己接住
+            //     点击，遮罩实际只盖「抽屉以外」的区域 —— 语义正好是
+            //     「点抽屉以外任意地方都收回」。
+            if state.progress > 0.02 {
+                Color.black
+                    .opacity(0.32 * Double(state.progress))
+                    .contentShape(Rectangle())
+                    .onTapGesture { state.close() }
+                    .allowsHitTesting(true)
+                    .zIndex(1)
+            }
 
             // ── 抽屉层 ──
             if useTemplate {
@@ -304,6 +303,9 @@ struct DrawerContainer<Drawer: View, Content: View>: View {
                     // 抽屉完全收起时不要参与命中测试，否则它的右边缘会
                     // 挡住内容区左侧 1pt，点击会莫名没反应。
                     .allowsHitTesting(state.progress > 0.02)
+                    // 必须高于遮罩层（zIndex 1），否则抽屉里的会话行、
+                    // 齿轮、xmark 会被遮罩盖住点不到。
+                    .zIndex(2)
             }
 
             // ── 手势层 ──
@@ -475,7 +477,25 @@ private struct EdgePanOverlay: UIViewRepresentable {
         var activeWidth: CGFloat = 0          // >0 表示抽屉开着，整片可接管
         var edgeSlop: CGFloat = DrawerState.edgeSlop
 
+        /// [R45-返回键不灵敏] 顶部导航栏高度（状态栏 + 44pt 导航栏）。
+        ///
+        /// 系统返回键 ‹ 在导航栏左上角，而手势层是 ZStack 最上层、又对
+        /// 左边缘 edgeSlop 内返回 true —— 手指点返回键时触摸先被这一层
+        /// 吃掉，下面的 UIBarButtonItem 收不到点击，于是「要点好几次」。
+        ///
+        /// 解决：把顶部导航栏这一段从手势层的命中区里挖掉。返回键区域
+        /// 的触摸直接穿透（point(inside:) 返回 false），滑动手势则因为
+        /// `UIScreenEdgePanGestureRecognizer` 需要横向位移才 begin，不受
+        /// 影响 —— 从导航栏下方左滑拉抽屉照常工作。
+        private var navBarBottom: CGFloat {
+            safeAreaInsets.top + 44
+        }
+
         override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
+            // 顶部导航栏区域：不拦截，让系统返回键可点。
+            if point.y < navBarBottom {
+                return false
+            }
             if activeWidth > 0 {
                 // 抽屉开着：整片都可接管（用于拖回）
                 return true

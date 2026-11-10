@@ -78,7 +78,7 @@ enum RelayRouteMode: String, Codable, CaseIterable, Identifiable {
 struct RelayProviderProfile: Codable, Equatable {
     /// ProviderInstance.id
     var instanceId: String
-    /// 内网地址，带协议与端口，例如 http://192.168.1.88:8080
+    /// 内网地址，带协议与端口，例如 http://192.168.x.x:8080
     var homeURL: String
     /// 外网地址，带协议，例如 https://xxx.dpdns.org
     var awayURL: String
@@ -102,8 +102,53 @@ struct RelayProviderProfile: Codable, Equatable {
     /// 把用户已配好的中转站全部丢掉。
     var appendV1Suffix: Bool? = nil
 
+    /// [R45-直连/在外模型] 直连线路（内网）用的模型 id，纯字符串。
+    ///
+    /// 来自用户在中转站表单里「点箭头 → 拉该线路 /v1/models → 选中」的结果。
+    /// 不存 LLMModel 对象、也不进 ProviderConfigStore 的模型体系 —— 这是
+    /// **中转站专属的请求级覆盖**：发消息时把请求体 `model` 字段替换成它，
+    /// 和 App 原版的 ModelEntry/ModelGroup 是两套独立的东西。
+    ///
+    /// 可选解码：老档案没有这字段时解码为 nil，覆盖逻辑自动跳过（不覆盖）。
+    var lanModel: String? = nil
+    /// 在外线路（外网）用的模型 id。语义同 `lanModel`。
+    var wanModel: String? = nil
+
     /// 取「要不要追加 /v1」，老档案没有这个字段时给 true（与建实例时的默认一致）
     var effectiveAppendV1: Bool { appendV1Suffix ?? true }
+
+    /// 按当前线路取要覆盖的模型 id。
+    ///
+    /// 规则（与设计稿一致）：
+    ///   · 当前线路已选 → 用该线路的模型；
+    ///   · 当前线路未选 → 回落到另一条已选模型；
+    ///   · 两条都没选 → 返回 nil（不覆盖，走 App 原版 model）。
+    func modelForRoute(isLan: Bool) -> String? {
+        let primary = isLan ? lanModel : wanModel
+        let fallback = isLan ? wanModel : lanModel
+        return Self.nonEmpty(primary) ?? Self.nonEmpty(fallback)
+    }
+
+    /// 当前**生效**线路是不是内网。口径与 `effectiveURL()` 完全一致 ——
+    /// auto 模式看 `lastResolvedIsLan`（未判过默认外网），homeOnly 恒内网，
+    /// awayOnly 恒外网。供镜像表算「当前该用哪个模型」。
+    func resolvedIsLan() -> Bool {
+        switch routeMode {
+        case .homeOnly:
+            return true
+        case .awayOnly:
+            return false
+        case .auto:
+            return lastResolvedIsLan ?? false
+        }
+    }
+
+    private static func nonEmpty(_ s: String?) -> String? {
+        guard let v = s?.trimmingCharacters(in: .whitespacesAndNewlines), !v.isEmpty else {
+            return nil
+        }
+        return v
+    }
 
     /// 生效地址。判定缓存优先，没判过就按偏好值给一个确定答案。
     func effectiveURL() -> String {
@@ -209,6 +254,15 @@ final class RelayProfileStore {
         RelayProfileMirror.shared.url(for: instanceId)
     }
 
+    /// 同步取「当前线路该用哪个模型 id」。
+    ///
+    /// 请求构造路径（`LLMProviderFactory.makeProvider`）上不能 async，
+    /// 所以这里走加锁镜像表。返回 nil 表示该中转站没配线路模型，
+    /// 不覆盖、走 App 原版 model。
+    nonisolated func overrideModelId(for instanceId: String) -> String? {
+        RelayProfileMirror.shared.modelId(for: instanceId)
+    }
+
     // MARK: 写
 
     func upsert(_ profile: RelayProviderProfile) {
@@ -275,11 +329,16 @@ final class RelayProfileStore {
     /// 之前是「每个写调用点各自 set/remove」，漏一处就是
     /// 「界面显示新地址、请求还打旧地址」，查起来极费劲。
     private func rebuildMirror(from list: [RelayProviderProfile]) {
-        RelayProfileMirror.shared.replaceAll(
-            list.reduce(into: [String: String]()) { acc, p in
-                acc[p.instanceId] = p.effectiveURL()
+        var urls: [String: String] = [:]
+        var models: [String: String] = [:]
+        for p in list {
+            urls[p.instanceId] = p.effectiveURL()
+            // 已按当前线路解析好的最终模型（nil 表示没配，不覆盖）
+            if let m = p.modelForRoute(isLan: p.resolvedIsLan()) {
+                models[p.instanceId] = m
             }
-        )
+        }
+        RelayProfileMirror.shared.replaceAll(urls, models: models)
     }
 
     /// 落盘。
@@ -321,6 +380,8 @@ final class RelayProfileMirror {
     private init() {}
 
     private var map: [String: String] = [:]
+    /// instanceId → 已按当前线路解析好的最终模型 id。没有 = 该中转站没配线路模型。
+    private var modelMap: [String: String] = [:]
     private let lock = NSLock()
 
     func url(for instanceId: String) -> String? {
@@ -329,14 +390,22 @@ final class RelayProfileMirror {
         return map[instanceId]
     }
 
+    /// 取当前线路该用的模型 id。nil = 没配，不覆盖。
+    func modelId(for instanceId: String) -> String? {
+        lock.lock()
+        defer { lock.unlock() }
+        return modelMap[instanceId]
+    }
+
     /// 全量替换。**这是唯一的写入口** —— 没有单条 `set` / `remove`。
     ///
     /// 故意不给单条写：给了就又会变成「哪个调用点忘了同步」，而那正是
     /// 这次要消灭的 bug 类型。调用方统一从 `storage` 拿全量快照重建，
     /// 数量是个位数，没有性能问题。
-    func replaceAll(_ new: [String: String]) {
+    func replaceAll(_ new: [String: String], models: [String: String]) {
         lock.lock()
         map = new
+        modelMap = models
         lock.unlock()
     }
 }

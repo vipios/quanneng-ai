@@ -2,7 +2,9 @@
 //  SessionDrawer.swift
 //  全能AI - 抽屉里的会话列表
 //
-//  R25 / R28 的落地。抽屉内容 = 标题 + 搜索 + 分组会话列表 + 底部两个入口。
+//  R25 / R28 的落地。抽屉内容 = 标题 + 搜索 + 两个入口 + 产物折叠区 + 分组会话列表。
+//  R46 对齐 R40 模板：标题固定「全能AI管理」，副标题「N 个对话 · N 个产物」，
+//  两个入口（全部产物 / 新建任务）上移到搜索框下方，「全部产物」改为原地折叠展开。
 //
 //  刻意复用的东西：行渲染直接用现成的 `SessionStackRow`，不另造一套。
 //  理由很实在 —— 那一行里有运行指示、未读徽标、高亮匹配片段、拖拽、
@@ -31,6 +33,10 @@ struct SessionDrawer: View {
     let groups: [SidebarGroup]
     let currentSessionId: String?
 
+    /// 产物数据源。R46 起「全部产物」改为抽屉内原地折叠展开（对齐 R40），
+    /// 需要按对话聚合的产物分组来渲染折叠区 + 算副标题里的产物总数。
+    @ObservedObject var artifactStore: ArtifactStore
+
     /// 每个会话的运行态。抽成闭包而不是传整张 Set，是为了不让抽屉在
     /// 任何一个会话的运行态变化时整块重建 —— 只有真正读到的行会刷。
     let isActive: (String) -> Bool
@@ -45,7 +51,6 @@ struct SessionDrawer: View {
 
     /// 动作
     let menuActions: SessionMenuActionChannel
-    let onOpenAllArtifacts: () -> Void
     let onNewChat: () -> Void
     let onOpenSettings: () -> Void
     let onSearchChanged: (String) -> Void
@@ -53,17 +58,11 @@ struct SessionDrawer: View {
     /// 折叠状态。抽屉自己记 —— 这是纯展示偏好，不必回写全局。
     @State private var collapsed: Set<String> = []
 
+    /// 「全部产物」折叠区是否展开（R46：原地折叠展开，不跳页）。
+    @State private var artifactsExpanded = false
+
     /// 搜索框焦点
     @FocusState private var searchFocused: Bool
-
-    /// 产物总数只用于标题副行。订阅单例而不是另开入参。
-    @ObservedObject private var artifacts = ArtifactStore.shared
-
-    /// 「全部产物」折叠区是否展开。纯展示状态，不回写全局。
-    ///
-    /// 设计稿（.dw-fold / toggleFold）的行为是：点入口在抽屉里展开一张
-    /// 「对话 → 产物数」的清单，再点某一行才进全屏页。不是点一下就跳走。
-    @State private var foldOpen = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -74,14 +73,9 @@ struct SessionDrawer: View {
             // ── 搜索 ──
             searchBar
 
-            // ── 两个入口：搜索框正下方同一行 ──
-            // [R32-入口位置] 原先挂在 VStack 最末尾（底部那条），设计稿
-            // （联动模板-完整.html 的 .dw-actions）是紧贴搜索框下方一行居中。
-            // 底部那条会随列表长度浮动，越长的列表越难够到；放上面是固定位置。
-            entryRow
-
-            // ── 产物折叠区（点「全部产物」在同页展开） ──
-            artifactFold
+            // ── 两个入口（全部产物 / 新建任务）──
+            // [R46-对齐R40] 从底部上移到搜索框正下方。
+            actionBar
 
             // ── 列表 ──
             ScrollView {
@@ -89,6 +83,10 @@ struct SessionDrawer: View {
                     if isSearching {
                         searchResults
                     } else {
+                        // 「全部产物」折叠区：点开后每个对话一个产物文件夹
+                        if artifactsExpanded {
+                            artifactsFold
+                        }
                         normalList
                     }
                 }
@@ -103,10 +101,8 @@ struct SessionDrawer: View {
         // [R28-设置入口右下角] 设置入口从导航栏 `.topBarLeading` 挪到这里：
         // 抽屉右下角一枚 52pt 悬浮齿轮，点它直接开原版 SettingsSheet。
         //
-        // 用 overlay 而不是塞进 VStack：齿轮要浮在列表之上、入口行之外，
-        // 两者互不影响。R32 把入口行挪到搜索框下方之后，齿轮的 bottom
-        // 内边距从 70 收到 14 —— 那个 70 是给底部按钮区让位的，按钮走了
-        // 它就得跟着走，否则齿轮会停在半空。
+        // 抽屉里齿轮是唯一固定在右下角的元素，用 overlay 浮在列表之上，
+        // 不参与 VStack 布局。
         .overlay(alignment: .bottomTrailing) {
             settingsGear
         }
@@ -121,6 +117,10 @@ struct SessionDrawer: View {
             if newValue != nil, drawerState.isOpen {
                 drawerState.close()
             }
+        }
+        .task {
+            // R46：进抽屉时刷新产物分组（按对话聚合），供折叠区和副标题用。
+            await artifactStore.refresh(sessions: sessions)
         }
     }
 
@@ -145,9 +145,9 @@ struct SessionDrawer: View {
         }
         .buttonStyle(.plain)
         .padding(.trailing, 14)
-        // R32：底部按钮区挪走后这里从 70 收到 14。70 = 旧底部按钮 54 + 间隙 16，
-        // 留着会让齿轮悬在列表中间。
-        .padding(.bottom, 14)
+        // 70 = 底部按钮区 54 + 间隙 16。两个 padding 分开写会被叠加成 70 以下的
+        // 两层缩进，齿轮就飘到按钮中间了，所以合成一个数。
+        .padding(.bottom, 70)
         .accessibilityLabel("设置")
     }
 
@@ -164,12 +164,12 @@ struct SessionDrawer: View {
         // 用 ZStack 后两件事解耦：标题按整条宽度居中（不管右边有没有按钮），
         // 按钮单独贴右。这样以后加第二个按钮也不会再动标题的位置。
         ZStack {
-            VStack(spacing: 2) {
+            VStack(spacing: 1) {
                 Text(sidebarTitle)
-                    .font(.system(size: 27, weight: .bold))
+                    .font(.system(size: 26, weight: .bold))
                     .lineLimit(1)
                 Text(subtitle)
-                    .font(.system(size: 12.5))
+                    .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
@@ -205,12 +205,7 @@ struct SessionDrawer: View {
     }
 
     private var sidebarTitle: String {
-        // 固定「全能AI管理」。
-        //
-        // [R32-标题对不齐设计] 这里原先是 `SoulStore.cachedMetadata.name`，
-        // 没配过人格名时上游给的是 App 名，于是抽屉顶上一直显示「Minis」。
-        // 设计稿（联动模板-完整.html 的 .dw-title）写死的是「全能AI管理」，
-        // 而且它是侧栏的身份标识，不该跟着用户改人格名一起漂。
+        // [R46-对齐R40] 抽屉标题固定「全能AI管理」，不再用 SOUL 名。
         "全能AI管理"
     }
 
@@ -219,18 +214,9 @@ struct SessionDrawer: View {
             let n = sessionMatchCount + artifactMatches.count
             return n == 0 ? "没找到" : "找到 \(n) 项"
         }
-        // 设计稿的副标题是两个数：对话数 · 产物数，不是只有会话数。
-        let a = artifactTotal
-        return a > 0 ? "\(sessions.count) 个对话 · \(a) 个产物" : "\(sessions.count) 个对话"
-    }
-
-    /// 产物总数。设计稿标题下那个「32 个产物」就是它。
-    ///
-    /// 直接读单例而不是从 ContentView 传：这个数只用来显示一行字，
-    /// 为它多开一条参数据通道不划算，而且 `ArtifactStore` 本来就是
-    /// `@MainActor` 单例，@ObservedObject 能跟着它自己刷。
-    private var artifactTotal: Int {
-        artifacts.groups.reduce(0) { $0 + $1.items.count }
+        // [R46-对齐R40] 副标题 = 「N 个对话 · N 个产物」。
+        let artifactCount = artifactStore.groups.reduce(0) { $0 + $1.items.count }
+        return "\(sessions.count) 个对话 · \(artifactCount) 个产物"
     }
 
     // MARK: 搜索
@@ -304,9 +290,8 @@ struct SessionDrawer: View {
                 Image(systemName: "chevron.down")
                     .font(.system(size: 9, weight: .bold))
                     .rotationEffect(.degrees(isCollapsed ? -90 : 0))
-                Text(group.label)
+                Text(localizedGroupLabel(group.label))
                     .font(.system(size: 11, weight: .semibold))
-                    .textCase(.uppercase)
                 Spacer(minLength: 0)
                 Text("\(group.ids.count)")
                     .font(.system(size: 11))
@@ -320,6 +305,20 @@ struct SessionDrawer: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel("\(group.label) 分组，\(group.ids.count) 个会话，\(isCollapsed ? "已折叠" : "已展开")")
+    }
+
+    /// 把 ContentView 传进来的英文分组 label（"Today"/"Yesterday"/...）映射成中文。
+    /// 只影响抽屉这一屏；主界面侧栏另有它自己的分组展示。
+    private func localizedGroupLabel(_ label: String) -> String {
+        switch label {
+        case "Pinned":     return "已置顶"
+        case "Today":      return "今天"
+        case "Yesterday":  return "昨天"
+        case "This Week":  return "本周"
+        case "This Month": return "本月"
+        case "Earlier":    return "更早"
+        default:           return label
+        }
     }
 
     private func row(_ sid: String, inFolder: Bool, isLast: Bool) -> some View {
@@ -407,7 +406,6 @@ struct SessionDrawer: View {
         HStack {
             Text(title)
                 .font(.system(size: 11, weight: .semibold))
-                .textCase(.uppercase)
             Spacer()
             Text("\(count)")
                 .font(.system(size: 11))
@@ -475,67 +473,54 @@ struct SessionDrawer: View {
         .padding(.top, 60)
     }
 
-    // MARK: 入口行
+    // MARK: 两个入口（全部产物 / 新建任务）
 
-    /// 搜索框正下方一行两枚入口：「全部产物」「新建任务」。
-    ///
-    /// 照设计稿 `.dw-actions / .dw-entry` 落：两枚等宽、46pt 高、圆角 12、
-    /// 白卡底 + 极细投影；左枚图标上叠数量角标 + 右侧 chevron，
-    /// 右枚是蓝色系的 primary 样式。
-    ///
-    /// 为什么入口放上面而不是像以前那样钉在底部：底部那条要吃掉一整个
-    /// safeAreaInset，抽屉里又没有列表留白去垫它，会话一多就顶到脸前；
-    /// 设计稿把它固定在搜索框下面，位置不随列表长度漂。
-    private var entryRow: some View {
+    /// [R46-对齐R40] 搜索框正下方的两个入口。
+    /// 左边「全部产物」带产物计数角标 + 右箭头，点击原地展开折叠区；
+    /// 右边「新建任务」是主色。
+    private var actionBar: some View {
         HStack(spacing: 10) {
             Button {
-                withAnimation(.easeInOut(duration: 0.22)) { foldOpen.toggle() }
-            } label: {
-                HStack(spacing: 7) {
-                    // 图标 + 右上角数量角标。角标单独叠一层而不是塞进 HStack，
-                    // 塞进去会把「全部产物」四个字挤掉（设计稿注释原话）。
-                    Image(systemName: "folder")
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(Color(.systemIndigo))
-                        .frame(width: 27, height: 27)
-                        .background(Color(.systemIndigo).opacity(0.12),
-                                    in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-                        .overlay(alignment: .topTrailing) {
-                            if artifactTotal > 0 {
-                                Text(artifactTotal > 99 ? "99+" : "\(artifactTotal)")
-                                    .font(.system(size: 9.5, weight: .bold))
-                                    .foregroundStyle(.white)
-                                    .padding(.horizontal, 4)
-                                    .frame(minWidth: 15, minHeight: 15)
-                                    .background(Color(.systemIndigo), in: Capsule())
-                                    .overlay {
-                                        Capsule().strokeBorder(Color(.secondarySystemGroupedBackground),
-                                                               lineWidth: 1.6)
-                                    }
-                                    .offset(x: 5, y: -4)
-                            }
-                        }
-
-                    Text("全部产物")
-                        .font(.system(size: 15, weight: .medium))
-                        .foregroundStyle(Color(.label))
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.85)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 9, weight: .semibold))
-                        .foregroundStyle(Color(.tertiaryLabel))
-                        // 展开时转 90°，和设计稿 .dw-entry.expanded .caret 一致。
-                        .rotationEffect(.degrees(foldOpen ? 90 : 0))
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    artifactsExpanded.toggle()
                 }
-                .padding(.horizontal, 12)
-                .frame(maxWidth: .infinity, minHeight: 46)
+            } label: {
+                HStack(spacing: 6) {
+                    ZStack(alignment: .topTrailing) {
+                        Image(systemName: "folder")
+                            .font(.system(size: 15))
+                            .foregroundStyle(Color.accentColor)
+                            .frame(width: 26, height: 26)
+                            .background(Color.accentColor.opacity(0.12),
+                                        in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                        let n = artifactStore.groups.reduce(0) { $0 + $1.items.count }
+                        if n > 0 {
+                            Text("\(n)")
+                                .font(.system(size: 9, weight: .bold))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 4)
+                                .frame(minWidth: 14)
+                                .frame(height: 14)
+                                .background(Color.accentColor, in: Capsule())
+                                .offset(x: 6, y: -5)
+                        }
+                    }
+                    Text("全部产物")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.primary)
+                    Spacer(minLength: 0)
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.tertiary)
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
+                .frame(maxWidth: .infinity)
                 .background(Color(.secondarySystemGroupedBackground),
-                            in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                            in: RoundedRectangle(cornerRadius: 10, style: .continuous))
                 .overlay {
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .strokeBorder(Color(.separator).opacity(0.4), lineWidth: 0.5)
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .stroke(Color(.separator).opacity(0.5), lineWidth: 0.5)
                 }
             }
             .buttonStyle(.plain)
@@ -544,106 +529,74 @@ struct SessionDrawer: View {
                 onNewChat()
                 drawerState.close()
             } label: {
-                HStack(spacing: 7) {
+                HStack(spacing: 6) {
                     Image(systemName: "plus")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(Color.accentColor)
-                        .frame(width: 27, height: 27)
-                        .background(Color.accentColor.opacity(0.14),
-                                    in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-
+                        .font(.system(size: 14, weight: .semibold))
                     Text("新建任务")
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(Color.accentColor)
-                        .lineLimit(1)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .font(.system(size: 13, weight: .semibold))
                 }
-                .padding(.horizontal, 12)
-                .frame(maxWidth: .infinity, minHeight: 46)
-                .background(Color.accentColor.opacity(0.09),
-                            in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+                .background(Color.accentColor,
+                            in: RoundedRectangle(cornerRadius: 10, style: .continuous))
             }
             .buttonStyle(.plain)
         }
-        .padding(.horizontal, 18)
-        .padding(.bottom, 10)
+        .padding(.horizontal, 12)
+        .padding(.bottom, 8)
     }
 
-    // MARK: 产物折叠区
+    // MARK: 全部产物折叠区
 
-    /// 点「全部产物」在抽屉里展开的「对话 → 产物数」清单。
-    ///
-    /// 行为照设计稿的 toggleFold / renderFold：
-    ///   点入口 → 同页展开（不跳走）；点某一行 → 关抽屉、进全屏产物页。
-    ///
-    /// 这一点和原版差别最大：原版是点一下直接关抽屉跳全屏页，中间没有
-    /// 「哪个对话有几个产物」这一层。稿子把这一层放在抽屉里，是为了让人
-    /// 先看见再决定进哪个。
-    ///
-    /// 高度封顶 282（稿子 .dw-fold.open 的 max-height），超了自己滚 ——
-    /// 这一层和外层会话列表是两个兄弟 ScrollView，不是嵌套，滚动手势
-    /// 不会打架。
-    @ViewBuilder
-    private var artifactFold: some View {
-        if foldOpen {
-            let groups = artifacts.groups
-            ScrollView {
-                VStack(spacing: 0) {
-                    if groups.isEmpty {
-                        Text("还没有产物")
-                            .font(.system(size: 12.5))
-                            .foregroundStyle(Color(.secondaryLabel))
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 16)
-                    } else {
-                        ForEach(Array(groups.enumerated()), id: \.element.id) { idx, g in
-                            Button {
-                                // 和稿子一样：先关抽屉，再进全屏页。
-                                drawerState.close()
-                                onOpenAllArtifacts()
-                            } label: {
-                                HStack(spacing: 10) {
-                                    Image(systemName: "folder")
-                                        .font(.system(size: 12, weight: .medium))
-                                        .foregroundStyle(Color(.systemIndigo))
-                                        .frame(width: 26, height: 26)
-                                        .background(Color(.systemIndigo).opacity(0.10),
-                                                    in: RoundedRectangle(cornerRadius: 7, style: .continuous))
-
-                                    Text(g.title)
-                                        .font(.system(size: 14))
-                                        .foregroundStyle(Color(.label))
-                                        .lineLimit(1)
-                                        .frame(maxWidth: .infinity, alignment: .leading)
-
-                                    Text("\(g.items.count)")
-                                        .font(.system(size: 11.5).monospacedDigit())
-                                        .foregroundStyle(Color(.tertiaryLabel))
-                                }
-                                .padding(.horizontal, 12)
-                                .padding(.vertical, 10)
-                                .contentShape(Rectangle())
-                                .overlay(alignment: .top) {
-                                    if idx > 0 {
-                                        Rectangle()
-                                            .fill(Color(.separator).opacity(0.5))
-                                            .frame(height: 0.5)
-                                            .padding(.leading, 34)
-                                    }
-                                }
-                            }
-                            .buttonStyle(.plain)
+    /// [R46-对齐R40] 点「全部产物」后原地展开的折叠区：每个对话一个产物文件夹行。
+    /// 点击某行 = 回到该对话（复用「在对话中定位」路径）。
+    private var artifactsFold: some View {
+        VStack(spacing: 0) {
+            if artifactStore.groups.isEmpty {
+                HStack(spacing: 8) {
+                    Image(systemName: "folder")
+                        .font(.system(size: 13))
+                        .foregroundStyle(.tertiary)
+                    Text("还没有产物")
+                        .font(.system(size: 13))
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 18)
+                .padding(.vertical, 12)
+            } else {
+                ForEach(artifactStore.groups) { g in
+                    Button {
+                        // 回到该对话（产物折叠区点击 = 定位到对话）
+                        menuActions.send(.open(g.id))
+                    } label: {
+                        HStack(spacing: 10) {
+                            Image(systemName: "folder")
+                                .font(.system(size: 14))
+                                .foregroundStyle(Color.accentColor)
+                                .frame(width: 28, height: 28)
+                                .background(Color.accentColor.opacity(0.10),
+                                            in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                            Text(g.title.isEmpty ? "未命名" : g.title)
+                                .font(.system(size: 14, weight: .medium))
+                                .lineLimit(1)
+                            Spacer(minLength: 0)
+                            Text("\(g.items.count)")
+                                .font(.system(size: 12))
+                                .foregroundStyle(.tertiary)
                         }
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 7)
+                        .contentShape(Rectangle())
                     }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("产物 \(g.title)，\(g.items.count) 个")
                 }
             }
-            .frame(maxHeight: 282)
-            .background(Color(.secondarySystemGroupedBackground),
-                        in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-            .padding(.horizontal, 18)
-            .padding(.bottom, 6)
-            .transition(.opacity.combined(with: .move(edge: .top)))
         }
+        .padding(.vertical, 4)
+        .transition(.opacity.combined(with: .move(edge: .top)))
     }
 }
 

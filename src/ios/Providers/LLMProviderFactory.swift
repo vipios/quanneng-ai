@@ -43,6 +43,21 @@ enum LLMProviderFactory {
         guard let instance = store.instance(for: entry.providerInstanceId) else {
             throw FactoryError.noInstance
         }
+        // [R45-直连/在外模型] 中转站按线路覆盖模型。
+        //
+        // 用户在中转站表单里给「直连线路」「在外线路」各指了一个模型，
+        // 发消息时按当前线路把请求体的 model 换成那个字符串。这里在构造
+        // provider 前算一次 effectiveModel，下面所有 make* 分支统一用它 ——
+        // 避免每个分支各写一份覆盖逻辑、迟早分叉。
+        //
+        // 只改 id（发给 API 的模型名），保留 catalog 的 contextWindow /
+        // reasoning 等元数据 —— 见 LLMModel.withId 的注释。
+        let effectiveModel: LLMModel
+        if let overrideId = RelayProfileStore.shared.overrideModelId(for: entry.providerInstanceId) {
+            effectiveModel = entry.model.withId(overrideId)
+        } else {
+            effectiveModel = entry.model
+        }
         // [T-model-custom-params] / [T-opencode-dedicated-channel] One seam for
         // every OpenAI-family branch: the dedicated OpenCode channel, then the
         // entry's own overrides. Chained here rather than inside each `make*`
@@ -61,23 +76,23 @@ enum LLMProviderFactory {
         let openCode = finish
         switch instance.providerType {
         case .anthropic:
-            return makeAnthropicProvider(instance: instance, model: entry.model)
+            return makeAnthropicProvider(instance: instance, model: effectiveModel)
         case .gemini:
-            return await makeGeminiProvider(instance: instance, model: entry.model)
+            return await makeGeminiProvider(instance: instance, model: effectiveModel)
         case .openAI:
-            return openCode(makeOpenAIProvider(instance: instance, model: entry.model))
+            return openCode(makeOpenAIProvider(instance: instance, model: effectiveModel))
         case .antigravity:
-            return await makeAntigravityProvider(instance: instance, model: entry.model)
+            return await makeAntigravityProvider(instance: instance, model: effectiveModel)
         case .openRouter:
-            return openCode(makeOpenRouterProvider(instance: instance, model: entry.model))
+            return openCode(makeOpenRouterProvider(instance: instance, model: effectiveModel))
         case .openAIResponses:
-            return openCode(makeOpenAIResponsesProvider(instance: instance, model: entry.model))
+            return openCode(makeOpenAIResponsesProvider(instance: instance, model: effectiveModel))
         case .xAI:
-            return openCode(makeXAIProvider(instance: instance, model: entry.model))
+            return openCode(makeXAIProvider(instance: instance, model: effectiveModel))
         case .kimiCode:
-            return openCode(makeKimiProvider(instance: instance, model: entry.model))
+            return openCode(makeKimiProvider(instance: instance, model: effectiveModel))
         case .githubCopilot:
-            return openCode(makeCopilotProvider(instance: instance, model: entry.model))
+            return openCode(makeCopilotProvider(instance: instance, model: effectiveModel))
         case .unsupported:
             throw FactoryError.voiceOnlyProvider
         }

@@ -47,6 +47,15 @@ struct RouteInjection {
     let device: DeviceContext
     /// 用户这句话本身，截断后用于日志与 prompt
     let sample: String
+    /// 用户在人格页手选的那套人格完整正文；「自动路由」时为空。
+    ///
+    /// 与 SOUL.md 的 identity 注入是两条独立通道：SOUL.md 走的是
+    /// `SystemPromptBuilder.identitySection()`（有 2000 token 上限），
+    /// 而这里走的是人格选择页选中的完整 system prompt 正文（3KB~19KB），
+    /// 不走那个上限。选「自动路由」时为空，什么都不追加，行为不变。
+    let personaBody: String
+    /// 「我的补充」——用户自己写的、想叠加在人格正文之上的额外约束。
+    let personaSupplement: String
 
     /// 拼成一段可注入 system prompt 的文本。
     ///
@@ -104,6 +113,25 @@ struct RouteInjection {
             lines.append(dev)
         }
 
+        // ── 第五段：手选人格正文 ──
+        //
+        // 用户在人格页选了具体人格时，这里把该人格的完整 system prompt
+        // 正文整段挂进来。这是「覆盖式」人格：选谁，就按谁的规则说话，
+        // 不再是 SOUL.md 那份 2000 token 内的简短 identity。
+        //
+        // 选「自动路由」时 personaBody 为空，这段不出现，行为完全不变。
+        if !personaBody.isEmpty {
+            lines.append("\n【已启用人格 · 完整设定】\n" + personaBody)
+        }
+
+        // ── 第六段：我的补充 ──
+        //
+        // 用户在人格页的「我的补充」里写的额外约束，叠加在人格正文之上。
+        // 这是用户自己的话，优先级最高，所以放在最后。
+        if !personaSupplement.isEmpty {
+            lines.append("\n【我的补充 · 优先级最高】\n" + personaSupplement)
+        }
+
         return lines.joined(separator: "\n")
     }
 }
@@ -137,9 +165,30 @@ enum RouteInjector {
         }
 
         let device = DeviceContextBuilder.context(for: decision)
+
+        // [R48-人格选择注入] + [R49-自动路由也注入正文]
+        //
+        // 用户在人格页手选了具体人格 → 注入该人格正文。
+        // 用户保持「自动路由」→ 注入 RouteEngine 自动判出的那个人格正文。
+        //
+        // 为什么自动路由也要注入正文：用户的核心诉求是「说我要破解
+        // ipa，就自动选三元组并加载对应人格干活」。自动判出的 persona
+        // 若只显示名字、不注入正文，AI 还是按 SOUL.md 那份简短 identity
+        // 说话，跟没选一样。这里把「自动判出的 persona」和「手选的
+        // persona」统一成同一条注入路径。
+        //
+        // 为什么不走 SOUL.md：8 套人格正文 3KB~19KB，远超 SOUL.md body
+        // 的 2000 token 上限，走那条路会被 isOverLimit 拒绝。这里独立
+        // 注入，不受那个限制。
+        let selectedPersona = PersonaCatalog.selectedId
+        let effectivePersona = selectedPersona == "auto" ? decision.persona : selectedPersona
+        let personaBody = PersonaBodies.body(for: effectivePersona)
+
         return RouteInjection(decision: decision,
                               device: device,
-                              sample: String(raw.prefix(80)))
+                              sample: String(raw.prefix(80)),
+                              personaBody: personaBody,
+                              personaSupplement: PersonaSupplement.text)
     }
 
     /// 从 `agentHistory` 里捞出本轮的用户输入。
