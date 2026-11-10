@@ -33,11 +33,15 @@
 #    不要再往 env 里加 SWIFT_ENABLE_EXPLICIT_MODULES=NO，那是反效果。
 #
 # 产物说明：
-#    workflow 用 CODE_SIGNING_ALLOWED=NO 编，产出**未签名**的 .app。
-#    这不能直装到 iPhone —— iOS 要求可执行文件有有效签名。
-#    自用装机路径：TrollStore 或自签（AltStore/Sideloadly/企业证书）。
-#    要出真正可安装的 ipa，需要证书 + provisioning profile，那属于
-#    签名环节，不在这里做。
+#    workflow 用 CODE_SIGNING_ALLOWED=NO 编，但**出包前会做 ad-hoc 重签**，
+#    把 entitlements（含 App Group）写回二进制。
+#    为什么要这一步：App Group 是 entitlement，不给就 containerURL(...) 返回
+#    nil，上游代码对返回值做了 `!`，运行时直接 brk #1 闪退（EXC_BREAKPOINT）。
+#    ad-hoc 签名（codesign --sign -）不要证书、不要 profile，签名结构里
+#    有 entitlements 槽位，写进去运行时就能读到。
+#    TrollStore / TrollStore Lite 安装时保留 entitlements（官方 README 明确写的）。
+#    要出 App Store / TestFlight 那种真证书签名，才需要证书 + profile，
+#    那属于另一条签名路线，不在这里做。
 # ============================================================
 
 name: Build iOS
@@ -617,8 +621,24 @@ jobs:
           MIN_OS=$(pb MinimumOSVersion "?")
           EXEC_NAME=$(pb CFBundleExecutable "$BASE")
 
+          # —— 产物文件名：用显示名，不用 target 名 ——
+          #
+          # .app 目录名是 Minis.app（target 叫 Minis，改它要动 pbxproj 和
+          # 一堆 CODE_SIGN_ENTITLEMENTS 路径，风险大收益小），
+          # 但**交给用户下载的文件名**没必要跟着叫 Minis：
+          # 设备上装出来显示的是「全能AI」，下载下来的文件叫
+          # Minis-1.0.ipa 会让人怀疑装错东西。
+          #
+          # 所以只改产物名。ipa 内部的 Payload/Minis.app 保持原样 ——
+          # 那是包结构，TrollStore 靠它识别，不能乱动。
+          ARTIFACT_NAME="$DISPLAY_NAME"
+          case "$ARTIFACT_NAME" in
+            ""|"?"|*"Doesn't Exist"*) ARTIFACT_NAME="$BASE" ;;
+          esac
+
           echo "bundle-id  : $BUNDLE_ID"
           echo "display    : $DISPLAY_NAME"
+          echo "artifact   : $ARTIFACT_NAME-$SHORT_VER.ipa"
           echo "version    : $SHORT_VER ($BUILD_VER)"
           echo "min-os     : $MIN_OS"
 
@@ -896,15 +916,19 @@ jobs:
           echo "  复核通过：主程序与三个 appex 全部带 group.com.vipios.app"
 
           # —— 1) 已签 .app（TrollStore / 越狱机直接吃）——
-          ditto -c -k --sequesterRsrc --keepParent "$APP" "out/${BASE}.zip"
+          ditto -c -k --sequesterRsrc --keepParent "$APP" "out/${ARTIFACT_NAME}.zip"
 
           # —— 2) .ipa：Payload/<App>.app 的 zip，ipa 就这个结构 ——
           # 这个 ipa 里已经带 ad-hoc 签名 + App Group entitlements，
           # TrollStore / TrollStore Lite 装进去会保留 entitlements。
+          #
+          # 注意 zip 的 -y 不能去掉：它把符号链接存成链接而不是跟随复制。
+          # .app 里有些 framework 版本目录是软链，跟着复制会把包撑大一倍，
+          # 还可能让 dyld 找不到路径。
           IPA_DIR=$(mktemp -d)
           mkdir -p "$IPA_DIR/Payload"
           cp -R "$APP" "$IPA_DIR/Payload/"
-          IPA_NAME="${BASE}-${SHORT_VER}.ipa"
+          IPA_NAME="${ARTIFACT_NAME}-${SHORT_VER}.ipa"
           ( cd "$IPA_DIR" && zip -qry "$OLDPWD/out/$IPA_NAME" Payload )
           rm -rf "$IPA_DIR"
           echo "ipa: out/$IPA_NAME"
@@ -914,6 +938,7 @@ jobs:
           {
             echo "app          = $BASE"
             echo "display-name = $DISPLAY_NAME"
+            echo "artifact     = $IPA_NAME"
             echo "bundle-id    = $BUNDLE_ID"
             echo "version      = $SHORT_VER ($BUILD_VER)"
             echo "min-os       = $MIN_OS"
@@ -925,6 +950,7 @@ jobs:
             echo ""
             echo "# 装法：越狱机用 TrollStore / TrollStore Lite 直接装这个 ipa。"
             echo "# entitlements 已写进二进制，TrollStore 安装时保留，不需再签。"
+            echo "# 文件名用显示名「$DISPLAY_NAME」，包内结构仍是 Payload/$BASE.app（不能改）。"
             echo "sig-stripped = $STRIPPED 个（剥离前带签名 $SIGNED_BEFORE 个）"
             echo "sig-residual = 0（已复核）"
             echo "app-group    = group.com.vipios.app（主程序 + 3 appex 均已写入）"
@@ -996,13 +1022,18 @@ jobs:
 
             echo "### 怎么装"
             echo ""
-            echo "编译用 \`CODE_SIGNING_ALLOWED=NO\`，所以产物是**未签名**的："
+            echo "产物已做 ad-hoc 重签，**entitlements（含 App Group）已写进二进制**："
             echo ""
             echo "| 文件 | 用途 |"
             echo "|---|---|"
-            echo "| \`*.ipa\` | 自签工具直接用（Sideloadly / AltStore / ESign / TrollStore） |"
-            echo "| \`*-unsigned.zip\` | 解出来就是 \`.app\`，TrollStore 或改包工具用 |"
+            echo "| \`*.ipa\` | **TrollStore / TrollStore Lite 直接装**（推荐，保留 entitlements） |"
+            echo "| \`*.zip\` | 解出来是签好的 \`.app\`，改包/调试用 |"
             echo ""
-            echo "未签名不能直接双击装 —— iOS 要有效签名。TrollStore 支持的系统可免签名安装，"
-            echo "其余走自签：重签后 bundle id 保持 \`com.vipios.app\` 才能和原版共存。"
+            echo "做 ad-hoc 重签不是为了「能装上」—— 是为了带 entitlements。"
+            echo "缺 \`com.apple.security.application-groups\` 时，"
+            echo "\`containerURL(forSecurityApplicationGroupIdentifier:)\` 返回 nil，"
+            echo "上游代码对它做了 \`!\` 强解包，启动即 \`brk #1\`（EXC_BREAKPOINT）闪退。"
+            echo ""
+            echo "走自己的证书重签（Sideloadly / ESign）时**必须保留 entitlements**，"
+            echo "否则回到闪退。Bundle id 是 \`com.vipios.app\`，与原版冲突，不能共存。"
           } >> "$GITHUB_STEP_SUMMARY"
