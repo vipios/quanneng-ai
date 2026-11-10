@@ -78,7 +78,10 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  contents: read
+  # contents: write —— 发布 Release 需要它。
+  # 原来是 read：只上传 artifact 确实够用，但那样就产不出可点击的直链，
+  # 每次都得在本地把包下回来再手工发 Release（见「Publish release」那一步的注释）。
+  contents: write
 
 jobs:
   build-ios:
@@ -988,6 +991,68 @@ jobs:
           path: out/
           retention-days: 14
           if-no-files-found: warn
+
+      # ── 7.5 自动发布 Release（给出可点击的直链）──
+      #
+      # 为什么必须有这一步：
+      #   actions 的 artifact 下载要带 Authorization 头，**没法当链接发给人点**。
+      #   以前每次构建完都要在本地把 zip 下回来、解出 ipa、再手动发一个
+      #   Release —— 既慢又容易出错，而且完全是重复劳动。
+      #
+      #   这里让构建自己发 Release，产物一出来就有直链：
+      #     https://github.com/<repo>/releases/download/latest/<包名>
+      #   `latest` 是滚动 tag，永远指向最新一次成功构建，
+      #   手机上收藏一次就不用再换地址了。
+      #
+      # 只在 Build 成功时跑（`if: success()`），失败的运行不会覆盖 latest，
+      # 免得把一个坏包推成「最新版」。
+      - name: "Publish release (rolling tag: latest)"
+        if: success()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          # 找包。out/ 里可能有多个 .ipa，取最新的那个。
+          IPA=$(ls -t out/*.ipa 2>/dev/null | head -1 || true)
+          if [ -z "$IPA" ]; then
+            echo "::warning::out/ 里没有 .ipa，跳过 Release 发布"
+            exit 0
+          fi
+          NAME=$(basename "$IPA")
+          echo "要发布的包: $NAME ($(stat -c%s "$IPA" 2>/dev/null || echo '?') 字节)"
+
+          # 复制成纯 ASCII 名。
+          # GitHub 会剥掉 asset 名里的非 ASCII 字符，中文名会变成空名，
+          # 直链拼不出来。Release 里统一用 ASCII，显示名走 release title。
+          cp "$IPA" "out/QuanNengAI-1.0.ipa"
+
+          NOTE="${{ inputs.note }}"
+          if [ -z "$NOTE" ]; then NOTE="build ${{ github.run_number }}"; fi
+
+          # latest 这个 tag 已存在就直接更新资产，不存在就建。
+          # 用 --clobber 覆盖同名资产，避免「资产已存在」报错。
+          if gh release view latest --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "更新已有的 latest release"
+            gh release edit latest \
+              --repo "${{ github.repository }}" \
+              --title "全能AI 1.0 · build ${{ github.run_number }}" \
+              --notes "$NOTE"
+            gh release upload latest "out/QuanNengAI-1.0.ipa" \
+              --repo "${{ github.repository }}" --clobber
+          else
+            echo "创建 latest release"
+            gh release create latest "out/QuanNengAI-1.0.ipa" \
+              --repo "${{ github.repository }}" \
+              --title "全能AI 1.0 · build ${{ github.run_number }}" \
+              --notes "$NOTE" \
+              --latest
+          fi
+
+          echo ""
+          echo "### 直链" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "https://github.com/${{ github.repository }}/releases/download/latest/QuanNengAI-1.0.ipa" >> $GITHUB_STEP_SUMMARY
 
       # ── 8. 汇总，失败时一眼看出挂在哪 ──
       - name: Summary
