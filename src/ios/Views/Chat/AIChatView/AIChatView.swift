@@ -1467,7 +1467,16 @@ struct AIChatView: View {
                     // Load session if: (a) VM is freshly created, or (b) cache hit but messages
                     // are empty — this can happen on iOS 16 where NavigationStack may recreate
                     // @StateObject unexpectedly, causing isNew=false but an empty VM.
-                    minisLogger.info("🔄SESSION AIChatView.onAppear loading session \(sessionId) isNew=\(cached.isNew) msgs=\(vm.messages.count)")
+                    // [R44-编译超时] 拆开写。这一行原来是一整条多段插值，
+                    // 在 wholemodule + -O 下 swift-frontend 类型检查耗尽预算：
+                    //   error: the compiler is unable to type-check this
+                    //          expression in reasonable time
+                    // 类型检查预算按**整个表达式树**算，同一函数里插值越多越容易炸，
+                    // 所以看到报错行号在 1410 / 1470 之间游走 —— 是同一个病因。
+                    // 先算成局部常量再拼，输出与原来逐字一致。
+                    let msgsForLog = vm.messages.count
+                    let isNewForLog = cached.isNew
+                    minisLogger.info("🔄SESSION AIChatView.onAppear loading session \(sessionId) isNew=\(isNewForLog) msgs=\(msgsForLog)")
                     // [T-ios-session-coldload-listsessions-block] .userInitiated
                     // so the actual session-open work wins the serialized
                     // ChatStore actor queue over background sidebar-refresh
@@ -1520,7 +1529,11 @@ struct AIChatView: View {
                         vm.forceScrollToBottom.send()
                     }
                     let totalElapsed = (CFAbsoluteTimeGetCurrent() - reuseStart) * 1000
-                    minisLogger.info("[SessionLoad] \(sessionId) — REUSE: \(String(format: "%.1f", totalElapsed))ms [mount: \(String(format: "%.1f", mountElapsed)) | msgs: \(vm.messages.count)]")
+                    // [R44-编译超时] 两处 String(format:) 嵌在插值里，拆出来。
+                    let totalText = String(format: "%.1f", totalElapsed)
+                    let mountText = String(format: "%.1f", mountElapsed)
+                    let reuseMsgs = vm.messages.count
+                    minisLogger.info("[SessionLoad] \(sessionId) — REUSE: \(totalText)ms [mount: \(mountText) | msgs: \(reuseMsgs)]")
                 }
             } else {
                 minisLogger.info("🔄SESSION AIChatView.onAppear nil sessionId — draft mode")
@@ -1645,7 +1658,13 @@ struct AIChatView: View {
             // the voice cleanup above so a transcript kept there counts.
             ViewModelCache.shared.parkNewChatIfUnsent(vm, groupId: initialGroupId)
             // Capsule auto-shows whenever audio is loaded — no manual activation needed.
-            minisLogger.info("🔑DRAFT AIChatView.onDisappear vm=\(vm.vmInstanceId) sessionId=\(sessionId ?? "nil") draftId=\(draftId ?? "nil") vm.sessionId=\(vm.sessionId ?? "nil") vm.isProcessing=\(vm.isProcessing)")
+            // [R44-编译超时] 5 段插值 + 3 个 ?? 拆成局部量再拼，降低类型检查负担。
+            let vmId = vm.vmInstanceId
+            let sidText = sessionId ?? "nil"
+            let draftText = draftId ?? "nil"
+            let vmSidText = vm.sessionId ?? "nil"
+            let processing = vm.isProcessing
+            minisLogger.info("🔑DRAFT AIChatView.onDisappear vm=\(vmId) sessionId=\(sidText) draftId=\(draftText) vm.sessionId=\(vmSidText) vm.isProcessing=\(processing)")
         }
         // [T-voice-bg-fg-gap] Structural immunity: while the voice panel is up
         // and the transcript editor is NOT open, there is no legitimate keyboard
@@ -1682,7 +1701,11 @@ struct AIChatView: View {
             let undocked = KeyboardDockRules.isUndocked(keyboardFrame: frame, screenBounds: bounds)
             if undocked != keyboardUndocked {
                 keyboardUndocked = undocked
-                AppLogger(category: "InputBarLayout").info("[FloatingKeyboard] keyboard \(undocked ? "undocked/floating — composer stays put" : "docked or hidden — normal avoidance") frame=\(frame) screen=\(bounds)")
+                // [R44-编译超时] 三元 + 两段插值拆出来。
+                let kbMode = undocked
+                    ? "undocked/floating — composer stays put"
+                    : "docked or hidden — normal avoidance"
+                AppLogger(category: "InputBarLayout").info("[FloatingKeyboard] keyboard \(kbMode) frame=\(frame) screen=\(bounds)")
             }
         }
         // No keyboardWillHide reset on purpose: iPadOS posts a "hide" when the
@@ -1745,7 +1768,11 @@ struct AIChatView: View {
                 if didSeedInputBarHeight,
                    latestH <= 0 || abs(latestH - committedH) > 0.5 {
                     didSeedInputBarHeight = false
-                    AppLogger(category: "InputBarLayout").info("[voice-bgfg] scene active — composer geometry stale (committed=\(committedH) latest=\(latestH) lastReport=\(String(format: "%.1f", sinceReport))s ago); re-arming seed so the next callback re-measures")
+                    // [R44-编译超时] String(format:) 嵌在插值里，拆出来。
+                    let committedText = committedH
+                    let latestText = latestH
+                    let sinceText = String(format: "%.1f", sinceReport)
+                    AppLogger(category: "InputBarLayout").info("[voice-bgfg] scene active — composer geometry stale (committed=\(committedText) latest=\(latestText) lastReport=\(sinceText)s ago); re-arming seed so the next callback re-measures")
                 }
 
                 // [T-voice-inputbar-collapse-selfheal] Re-arming only makes the
@@ -1764,9 +1791,25 @@ struct AIChatView: View {
                     let ticked = inputBarGeometryTick != probeBaseline
                     let age = inputBarLastGeometryAt.map { CFAbsoluteTimeGetCurrent() - $0 } ?? -1
                     if ticked {
-                        AppLogger(category: "InputBarLayout").info("[InputBarHealth] OK after foreground — composer re-reported geometry (h=\(latestInputBarFrameH) committed=\(inputBarHeight))")
+                        let h = latestInputBarFrameH
+                        let committed = inputBarHeight
+                        AppLogger(category: "InputBarLayout").info("[InputBarHealth] OK after foreground — composer re-reported geometry (h=\(h) committed=\(committed))")
                     } else {
-                        AppLogger(category: "InputBarLayout").error("[InputBarHealth] STALLED — no geometry callback 900ms after foreground. committed=\(inputBarHeight) latest=\(latestInputBarFrameH) lastReport=\(String(format: "%.1f", age))s ago voice=\(voiceInputActive) editing=\(voiceVM.isEditingTranscript) seeded=\(didSeedInputBarHeight). The composer host is not laying out; expect a blank bottom area. Leaving and re-entering the session rebuilds it.")
+                        // [R44-编译超时] 原来是 6 段插值 + 一个 String(format:)
+                        // 挤在一条 error(...) 里，是整份文件里最重的一处。
+                        // 先全部落成局部常量，再拼一条普通字符串。输出不变。
+                        let committed = inputBarHeight
+                        let latest = latestInputBarFrameH
+                        let ageText = String(format: "%.1f", age)
+                        let voiceOn = voiceInputActive
+                        let editing = voiceVM.isEditingTranscript
+                        let seeded = didSeedInputBarHeight
+                        let stalled = "[InputBarHealth] STALLED — no geometry callback 900ms after foreground. "
+                            + "committed=\(committed) latest=\(latest) lastReport=\(ageText)s ago "
+                            + "voice=\(voiceOn) editing=\(editing) seeded=\(seeded). "
+                            + "The composer host is not laying out; expect a blank bottom area. "
+                            + "Leaving and re-entering the session rebuilds it."
+                        AppLogger(category: "InputBarLayout").error(stalled)
                     }
                 }
                 // [T-voice-bg-fg-gap] Foreground reseal: if we return to a
@@ -1802,7 +1845,12 @@ struct AIChatView: View {
                 if let keyWindow {
                     let hadResponder = keyWindow.endEditing(true)
                     UIView.performWithoutAnimation { keyWindow.layoutIfNeeded() }
-                    AppLogger(category: "InputBarLayout").info("[voice-bgfg] scene \(phase == .inactive ? "inactive" : "background") — forced keyboard-dismiss completion (hadResponder=\(hadResponder)) voice=\(voiceInputActive) editing=\(voiceVM.isEditingTranscript)")
+                    // [R44-编译超时] 三元 + 4 段插值拆出来。
+                    let sceneText = phase == .inactive ? "inactive" : "background"
+                    let hadResp = hadResponder
+                    let voiceOn = voiceInputActive
+                    let editing = voiceVM.isEditingTranscript
+                    AppLogger(category: "InputBarLayout").info("[voice-bgfg] scene \(sceneText) — forced keyboard-dismiss completion (hadResponder=\(hadResp)) voice=\(voiceOn) editing=\(editing)")
                 }
             }
             if phase != .active, speechManager.state == .recording {
