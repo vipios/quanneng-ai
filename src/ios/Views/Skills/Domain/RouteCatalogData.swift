@@ -276,10 +276,10 @@ struct ModeCatalogItem: Identifiable {
     let symbol: String
     /// 图标底色。
     let tint: Color
-    /// 展开详情，每项是「标签 + 内容」。
-    let detail: [(String, String)]
     /// 是否默认模式（自动模式）。
     let isDefault: Bool
+    /// 展开详情，每项是「标签 + 内容」。
+    let detail: [(String, String)]
 }
 
 enum ModeCatalog {
