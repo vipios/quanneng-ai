@@ -73,7 +73,15 @@ struct SwipeBackEnabler: UIViewRepresentable {
             }
         }
 
-        func gestureRecognizerShouldBegin(_ g: UIGestureRecognizer) -> Bool {
+        // ⚠️ 这里的 `override` 是**必须**的，不是为了好看。
+        //
+        // `UIGestureRecognizerDelegate` 里这个方法有默认实现（协议扩展），
+        // 但 UIView 本身也从 `NSObject` 那侧暴露了同名方法。我们的
+        // `SwipeBackView` 继承自 UIView，于是编译器认为这是「重写父类成员」，
+        // 漏掉 override 直接报：
+        //   error: overriding declaration requires an 'override' keyword
+        // 这不是运行时问题，是编译期硬错 —— 整个 target 编不过。
+        override func gestureRecognizerShouldBegin(_ g: UIGestureRecognizer) -> Bool {
             // 根视图不允许 pop —— 否则手势会把空栈当目标，界面直接僵住。
             guard let nav = navigationController else { return false }
             guard nav.viewControllers.count > 1 else { return false }

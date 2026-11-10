@@ -1407,7 +1407,20 @@ struct AIChatView: View {
             // [T-always-on] This is the chat on screen now.
             AlwaysOnController.shared.chatAppeared(key: vm.sessionId ?? vm.draftId)
             let sinceInit = (CFAbsoluteTimeGetCurrent() - AIChatViewModel.onAppearTimestamp) * 1000
-            minisLogger.info("[SessionLoad] onAppear T+\(String(format: "%.0f", sinceInit))ms isNew=\(cached.isNew) msgs=\(vm.messages.count)")
+            // [R44-编译超时] 原来是**一整行嵌套插值**：
+            //   minisLogger.info("[SessionLoad] onAppear T+\(String(format: "%.0f", sinceInit))ms isNew=\(cached.isNew) msgs=\(vm.messages.count)")
+            // 在 -O 全模块优化下，swift-frontend 对这条表达式做类型检查会
+            // 耗尽预算，直接报：
+            //   error: the compiler is unable to type-check this expression
+            //          in reasonable time
+            // 这一行本身没变过（和远端逐字节一致），但周边代码一多就会被拖垮 ——
+            // 类型检查的预算按整个表达式树算，不是按这一行算。
+            //
+            // 拆成「先算字符串、再打日志」两步：插值只做一次，类型检查的
+            // 候选集合小一个数量级。行为完全一样，输出的日志一字不差。
+            let sinceInitMs = String(format: "%.0f", sinceInit)
+            let msgCount = vm.messages.count
+            minisLogger.info("[SessionLoad] onAppear T+\(sinceInitMs)ms isNew=\(cached.isNew) msgs=\(msgCount)")
             // [T-inputbar-stale-across-reentry] Re-arm the leading-edge seed on
             // EVERY appear. AIChatView is keyed `.id(sessionId)` in ContentView,
             // so re-entering the SAME session reuses the same SwiftUI identity
