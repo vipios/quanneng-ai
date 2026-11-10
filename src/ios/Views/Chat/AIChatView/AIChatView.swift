@@ -433,16 +433,6 @@ struct AIChatView: View {
     @State var inputBottomRowWidth: CGFloat = 0
     @Environment(\.scenePhase) private var scenePhase
 
-    // MARK: - [R43-左上角] 抽屉入口
-    //
-    // 抽屉状态走「可选 Environment」读取（见 DrawerStateOptionalKey），
-    // 返回键判据用 hSizeClass —— 这两处原先是「返回闭包的计算属性」，
-    // 但 AIChatView 这个 struct 已经顶到 Swift 类型检查器（singlefile
-    // 模式）的单文件预算上限，再多两个闭包返回属性就把弦拉断了，
-    // 编译器随机在某行报「type-check in reasonable time」。
-    // 所以这里改成直接读，把闭包构造下沉到 body 调用点，减轻推断负担。
-    @Environment(\.drawerStateOrNil) private var drawerStateOrNil
-
     // MARK: - [T-ipad-composer-resize] Draggable composer height (iPad only)
 
     /// Persisted composer height as a FRACTION of screen height (e.g. 0.5).
@@ -539,30 +529,7 @@ struct AIChatView: View {
     /// (file was deleted, the session was pruned, or iCloud hasn't synced yet).
     @State var missingMinisFileName: String?
 
-    /// [R45-编译超时] 左滑返回探针抽成独立 @ViewBuilder，不写进 body。
-    ///
-    /// body 里 `.overlay { if hSizeClass == .compact { ... } }` 这种带条件
-    /// 分支的 ViewBuilder 闭包，是 Swift 类型检查最经典的超时形态 ——
-    /// 编译器要在 body 那条 ~80 个修饰符的链上，为 `if` 的两个分支做
-    /// opaque `some View` 类型合并，巨型 struct 的推断预算直接被顶破，
-    /// 报 "unable to type-check in reasonable time" 且行号随机游走。
-    /// 抽成独立属性后，body 里只剩 `.overlay { swipeBackProbe }` 一层
-    /// 简单引用，类型推断压力归零。
-    @ViewBuilder
-    private var swipeBackProbe: some View {
-        if hSizeClass == .compact {
-            SwipeBackEnabler()
-                .frame(width: 0, height: 0)
-                .allowsHitTesting(false)
-        }
-    }
-
     var body: some View {
-        // [R44-编译超时] 抽屉/返回的两个闭包提前落成局部量，避免在
-        // ChatToolbarHost 调用点做嵌套闭包推断（map { { open() } } 和
-        // 三元 ? { dismiss() } : nil 是 Swift 类型检查的经典超时形态）。
-        let openDrawerClosure: (() -> Void)? = drawerStateOrNil.map { state in { state.open() } }
-        let backClosure: (() -> Void)? = hSizeClass == .compact ? { dismiss() } : nil
         // [T-ios-chat-body-stack-erase] Type-erase the page's content before
         // the ~80-modifier chain below. Most of those modifiers (.sheet,
         // .onChange, .onReceive, .alert, ...) return an opaque `some View`
@@ -838,8 +805,6 @@ struct AIChatView: View {
         .background(
             ChatToolbarHost(key: chatToolbarKey,
                             showsTrailing: !ChatNavMenuBarItem.isEnabled,
-                            onOpenDrawer: openDrawerClosure,
-                            onBack: backClosure,
                             title: {
                 chatNavPrincipalContent
             }, trailing: {
@@ -847,18 +812,6 @@ struct AIChatView: View {
             })
             .equatable()
         )
-        // [R43-左上角书本] 换掉系统返回箭头。两条必须成对出现：
-        //   · `navigationBarBackButtonHidden` 把系统 ‹ 藏掉 —— 不藏的话
-        //     屏幕上会同时有「‹」和我们的书本，两个返回键；
-        //   · `SwipeBackEnabler` 把「藏返回键时一起失效的左滑返回」接回来。
-        // 只做第一条 = 左滑返回没了，那个代价不能接受。
-        //
-        // 挂成 `.overlay` 而不是第二个 `.background`：工具栏宿主已经在
-        // `.background` 上，再叠一层 background 有两层背景互相影响尺寸的
-        // 隐患。overlay 挂一个零尺寸、不吃触摸的探针，位置无关紧要 ——
-        // 它只负责抓一下导航控制器。
-        .navigationBarBackButtonHidden(hSizeClass == .compact)
-        .overlay { swipeBackProbe }
         // [T-ios-navbar-menu-baritem] Outside the equatable host on purpose:
         // its update pass is what refreshes the menu's action closures.
         .background(navBarMenuInstaller)
