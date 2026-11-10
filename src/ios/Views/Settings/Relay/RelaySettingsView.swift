@@ -216,8 +216,10 @@ struct RelaySettingsView: View {
                 Text(saveError)
                     .foregroundColor(.red)
             } else {
+                // 用户要求删掉「密码用 AES-GCM 加密…」那句 —— 技术实现
+                // 不该摆在设置项下面当前情说明。只在没存过时说一句用途。
                 Text(remembered
-                     ? "密码用 AES-GCM 加密后只存在这台手机上。进后台、重启中转站、重启路由器都直接用它，不会再让你输入。"
+                     ? "进后台、重启中转站、重启路由器都直接用它，不会再让你输入。"
                      : "只需输入这一次。存好之后进后台、重启设备都不会再问你。")
             }
         }
@@ -489,5 +491,157 @@ struct RelayLogView: View {
             }
         }
         .onAppear { lines = RelayLog.shared.dump }
+    }
+}
+
+// MARK: - 两页共用的「一次填完」表单
+
+/// 中转站页与路由器页在「什么都没配」时显示同一张表单。
+///
+/// 为什么抽成一份：这两页都是「进页面就要能用」的入口，字段和验证逻辑
+/// 完全一样（直连地址 / 外网地址 / 后台密码）。各写一份的话，以后改
+/// 验证顺序很自然只改一边，表现就是「路由器页填了能用，中转站页填了
+/// 一直说密码不对」——这种不一致用户根本查不出来。
+///
+/// 刻意**不**跳 RelaySettingsView：那份设置页是给「已经配好了、要精调」
+/// 的场景准备的（换密码、看诊断、看日志）。第一次填只需要三个字段。
+struct RelayQuickSetupForm: View {
+
+    /// 保存成功并已刷新线路后回调，让调用方决定要不要切界面。
+    var onSaved: () async -> Void
+
+    @ObservedObject private var store = RelayStore.shared
+
+    // 初值取已存的值：用户可能只填了一半（写了地址没写密码），
+    // 进页面要看到他填过的，而不是三个空框。
+    @State private var home = RelayVault.shared.homeHost
+    @State private var wan = RelayVault.shared.awayHost
+    @State private var pass = ""
+    @State private var saving = false
+    @State private var msg: String?
+    @State private var ok = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 10) {
+                Image(systemName: "key.fill")
+                    .font(.system(size: 18))
+                    .foregroundColor(.blue)
+                Text("填一次就记住")
+                    .font(.headline)
+                Spacer(minLength: 0)
+            }
+
+            field("直连地址（在家用）", "192.168.1.88", $home)
+            field("外网地址（在外面用）", "example.dpdns.org", $wan)
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("后台密码")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                SecureField("进后台、重启中转站、重启路由器都用它", text: $pass)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .font(.system(size: 14))
+            }
+
+            Button {
+                Task { await save() }
+            } label: {
+                HStack(spacing: 6) {
+                    if saving { ProgressView().scaleEffect(0.7) }
+                    Text(saving ? "正在验证…" : "保存并验证")
+                        .font(.subheadline.weight(.medium))
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 10)
+                .background(Color.blue)
+                .foregroundColor(.white)
+                .cornerRadius(10)
+            }
+            .buttonStyle(.plain)
+            .disabled(saving || home.trimmingCharacters(in: .whitespaces).isEmpty)
+
+            if let m = msg {
+                Text(m)
+                    .font(.caption)
+                    .foregroundColor(ok ? .green : .orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Text("只填主机名，不用填端口：直连固定 8080，外网走 443。填过之后地址和密码都记住，要换随时回来改。")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(16)
+        .background(Color(.secondarySystemGroupedBackground))
+        .cornerRadius(12)
+    }
+
+    private func field(_ title: String, _ placeholder: String,
+                       _ text: Binding<String>) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title)
+                .font(.caption)
+                .foregroundColor(.secondary)
+            TextField(placeholder, text: text)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .keyboardType(.URL)
+                .font(.system(size: 14, design: .monospaced))
+        }
+    }
+
+    /// 先落地址，再用**刚填的**地址验密码。
+    ///
+    /// 顺序不能反：用户很可能同时改了网段和密码，拿旧地址验新密码会一律
+    /// 判「密码不对」，明明填对了却被拦下来。两条地址各试一次，任一通过
+    /// 即通过 —— 在外时内网地址本来就该不通。
+    private func save() async {
+        saving = true
+        defer { saving = false }
+        msg = nil
+        ok = false
+
+        let h = RelayVault.cleanHost(home)
+        let a = RelayVault.cleanHost(wan)
+        RelayVault.shared.homeHost = h
+        RelayVault.shared.awayHost = a
+
+        let p = pass.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !p.isEmpty else {
+            msg = "地址已保存。密码留空，进后台时还会再问一次。"
+            ok = true
+            await store.refresh()
+            await onSaved()
+            return
+        }
+
+        var passed = false
+        if !h.isEmpty, await RelayBackend.verifyKey(base: "http://\(h):8080", key: p) {
+            passed = true
+        }
+        if !passed, !a.isEmpty, await RelayBackend.verifyKey(base: "https://\(a)", key: p) {
+            passed = true
+        }
+
+        if passed {
+            // 走 store 而不是直写 Vault：store 要重算 unconfigured，
+            // 还要 +1 vaultRevision 让 WebView 注入脚本用上新密码。
+            RelayVault.shared.save(password: p)
+            store.changePassword(p)
+            pass = ""
+            msg = "已保存。以后进后台、重启都不会再问你。"
+            ok = true
+        } else {
+            // 地址留着（那是用户明确要写的），密码不存 —— 存错的密码
+            // 只会让下次进后台报「需要访问密钥」，用户还查不出原因。
+            msg = "连不上这个地址，或密码不对 —— 密码没有保存。地址已保存。"
+            ok = false
+        }
+
+        await store.refresh()
+        await onSaved()
     }
 }

@@ -213,6 +213,24 @@ struct SettingsSheet: View {
                     }
                     .settingsRowRenameable(.skills,
                                            defaultName: AppLocalized("Skills"))
+                    // [R33-说话模式] 自动判定会按能力域给一个默认说话模式
+                    // （逆向域→逆向专家、Web 域→安全研究）。这一行让用户
+                    // 把它固定下来，也可以留在「自动」不管。
+                    NavigationLink {
+                        SpeakingModesView()
+                    } label: {
+                        Label {
+                            SettingsRowLabel(.speakingMode, fallback: "说话模式")
+                        } icon: {
+                            Image(systemName: "waveform")
+                                .font(.system(size: 9))
+                                .foregroundStyle(.white)
+                                .frame(width: 21, height: 21)
+                                .background(.orange, in: Circle())
+                        }
+                    }
+                    .settingsRowRenameable(.speakingMode,
+                                           defaultName: AppLocalized("说话模式"))
                     NavigationLink {
                         SoulSettingsView()
                     } label: {
@@ -710,6 +728,63 @@ struct SettingsSheet: View {
             }
         }
         return id.isEmpty ? UIDevice.current.model : id
+    }
+}
+
+// MARK: - 说话模式
+
+/// 把自动判定给出的说话模式固定下来。
+///
+/// 刻意只用系统 `List` 的行样式 —— 与设置页其它行同一套语法，
+/// 不引入第二套卡片组件，也不改设置页原本的视觉。
+///
+/// 为什么需要这个页面：自动判定是按「能力域」给默认说话模式的
+/// （逆向域 → 逆向专家、Web 域 → 安全研究）。同一件事用户偶尔想换口径，
+/// 比如写检查脚本时希望话少一点。以前只能改词表，现在一行设置就够。
+struct SpeakingModesView: View {
+
+    @State private var selected = RouteModePref.current
+
+    var body: some View {
+        List {
+            Section {
+                ForEach(RouteModePref.all, id: \.self) { id in
+                    Button {
+                        selected = id
+                        RouteModePref.set(id)
+                    } label: {
+                        HStack(spacing: 12) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(RouteModePref.label(id))
+                                    .foregroundStyle(Color.primary)
+                                if id == "auto" {
+                                    Text("按能力域自动选，不干预")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                            Spacer(minLength: 0)
+                            if selected == id {
+                                Image(systemName: "checkmark")
+                                    .font(.system(size: 14, weight: .semibold))
+                                    .foregroundStyle(Color.accentColor)
+                            }
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    // 不用 .plain：List 行要保留系统的按下高亮，
+                    // .plain 会把整行高亮去掉，点起来像没反应。
+                    .buttonStyle(.borderless)
+                }
+            } header: {
+                Text("说话模式")
+            } footer: {
+                Text("选定后一直用它；选「自动」则每次按你这句话的内容判定。改完立刻生效，下一条消息就按新口径。")
+            }
+        }
+        .navigationTitle("说话模式")
+        .navigationBarTitleDisplayMode(.inline)
+        .onAppear { selected = RouteModePref.current }
     }
 }
 

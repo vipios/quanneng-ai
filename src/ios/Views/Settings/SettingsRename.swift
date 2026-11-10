@@ -51,6 +51,7 @@ enum SettingsRowId: String, CaseIterable {
     case agentTools         = "agentTools"
     case subAgents          = "subAgents"
     case skills             = "skills"
+    case speakingMode       = "speakingMode"
     case soul               = "soul"
     case memory             = "memory"
     case mcpIntegrations    = "mcpIntegrations"

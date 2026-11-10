@@ -1119,7 +1119,16 @@ struct ContentView: View {
                 case 3:
                     break
                 default:
-                    if !sessions.isEmpty,
+                    if sessions.isEmpty {
+                        // [R33-去引导页] 一次都没聊过时也直接进聊天界面。
+                        // 以前这里什么都不做，于是停在空列表上、被那张
+                        // 「欢迎使用 Minis」三步引导盖住。用户要求删掉引导页：
+                        // 进 App 就该看见能打字的界面，配 API 走
+                        // 左滑抽屉 → 右下角齿轮。
+                        var tx = Transaction()
+                        tx.disablesAnimations = true
+                        withTransaction(tx) { openSession(Self.makeNewSessionId()) }
+                    } else if !sessions.isEmpty,
                        let latest = sessions.first,
                        Date().timeIntervalSince(latest.updatedAt) > 15 * 60 {
                         var tx = Transaction()

@@ -21,6 +21,7 @@
 
 import Foundation
 import SwiftUI
+import Network
 
 @MainActor
 final class RelayStore: ObservableObject {
@@ -98,7 +99,51 @@ final class RelayStore: ObservableObject {
     /// 不在 init 里做，避免 App 启动阶段就去打网络。
     func bootstrap() {
         RelayLocalNet.requestPermission()
+        startPathWatch()
         Task { await refresh() }
+    }
+
+    // MARK: - 网络通路监听
+
+    private let pathMonitor = NWPathMonitor()
+    private var pathStarted = false
+    private var lastPathKey = ""
+
+    /// 网络通路变化（Wi‑Fi ↔ 蜂窝、断网恢复）时立刻重判。
+    ///
+    /// 为什么需要：`refreshIfStale()` 只在「进页面 / 回前台」触发。
+    /// 用户一直停在前台、中途换了网络 —— 走出家门 Wi‑Fi 掉、蜂窝起来 ——
+    /// 页面上的线路还是旧的：明明已经在外，界面仍写「在家 · 直连」，
+    /// 点重启会打一个已经不可达的内网地址，看着像按钮坏了。
+    ///
+    /// 用 NWPathMonitor 而不是定时器：事件驱动，网络不变就一声不响，
+    /// 不耗电（RelayRoute.swift 里明确写了不做定时轮询）。
+    private func startPathWatch() {
+        guard !pathStarted else { return }
+        pathStarted = true
+        pathMonitor.pathUpdateHandler = { [weak self] path in
+            // 只关心「通不通」和「走的哪种接口」。Wi‑Fi 名字不管 ——
+            // TrollStore 装的 App 读不到 SSID（见 RelayRoute.swift 第一条）。
+            let key = "\(path.status == .satisfied)/"
+                + "\(path.usesInterfaceType(.wifi))/"
+                + "\(path.usesInterfaceType(.cellular))"
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                // 首个回调只是当前初始状态，不触发重判 —— 否则冷启动
+                // 会连着判两次，多打一次 /health。
+                if self.lastPathKey.isEmpty {
+                    self.lastPathKey = key
+                    return
+                }
+                guard key != self.lastPathKey else { return }
+                self.lastPathKey = key
+                RelayLog.log("网络通路变化 → \(key)，重判线路")
+                // 清掉 1 秒的 staleness 门限：这是真换网了，必须立刻重判。
+                self.lastJudge = .distantPast
+                Task { await self.refresh() }
+            }
+        }
+        pathMonitor.start(queue: DispatchQueue(label: "minis.relay.path"))
     }
 
     // MARK: - 判定 + 拉数据

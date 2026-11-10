@@ -36,7 +36,7 @@ struct RelayRouterView: View {
         ScrollView {
             VStack(spacing: 16) {
                 if store.unconfigured {
-                    setupCard
+                    setupForm
                     // 结果条不能只在「已配置」分支里显示。
                     // 没配密码时点重启，perform 会直接把「需要先填密码」写进 actionResult，
                     // 要是这里不渲染，用户点完按钮屏幕一动不动，看着像点坏了。
@@ -120,42 +120,20 @@ struct RelayRouterView: View {
         }
     }
 
-    // MARK: - 概览卡（合并原「线路卡」+「状态卡」）
+    // MARK: - 直填表单（取代原「先填一次后台密码」引导卡）
 
-    /// 还没配过密码时的引导卡。
-    /// 不做成「弹输入框」，因为用户可能只是路过点进来看看。
-    private var setupCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 10) {
-                Image(systemName: "key.fill")
-                    .font(.system(size: 20))
-                    .foregroundColor(.blue)
-                Text("先填一次后台密码")
-                    .font(.headline)
-            }
-            Text("填过之后就一直记住，以后进后台、重启中转站、重启路由器都不会再问你。")
-                .font(.footnote)
-                .foregroundColor(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-
-            NavigationLink {
-                RelaySettingsView()
-            } label: {
-                Text("去填写")
-                    .font(.subheadline.weight(.medium))
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 10)
-                    .background(Color.blue)
-                    .foregroundColor(.white)
-                    .cornerRadius(10)
-            }
-            .buttonStyle(.plain)
-            .padding(.top, 2)
+    /// 还没配过时**本页直接出输入框**，不跳转、不弹 sheet。
+    ///
+    /// 原版是引导卡 + 「去填写」按钮，点了才跳 RelaySettingsView；
+    /// 用户要求取消这一步。字段与验证逻辑跟中转站页共用
+    /// `RelayQuickSetupForm`，两边不会漂移。
+    private var setupForm: some View {
+        RelayQuickSetupForm {
+            await store.refresh()
         }
-        .padding(16)
-        .background(Color(.secondarySystemGroupedBackground))
-        .cornerRadius(12)
     }
+
+    // MARK: - 概览卡（合并原「线路卡」+「状态卡」）
 
     private var overviewCard: some View {
         VStack(spacing: 0) {
@@ -189,7 +167,12 @@ struct RelayRouterView: View {
 
             Divider().opacity(0.4)
 
-            infoRow("地址", store.route?.displayAddress ?? "—", mono: true)
+            infoRow("当前地址", store.route?.displayAddress ?? "—", mono: true)
+            Divider().opacity(0.25).padding(.leading, 16)
+            // [R33-外网地址] 路由器挂在和中转站同一个域名后面，但在外面
+            // 重启设备时用户需要确认「走的是哪个地址」——以前这行只在
+            // 设置页里能看到，概览卡上没有任何痕迹。
+            infoRow("外网地址", RelayVault.shared.awayHost, mono: true)
             Divider().opacity(0.25).padding(.leading, 16)
             infoRow("通道", store.route?.detail ?? "—", mono: false)
         }

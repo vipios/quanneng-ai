@@ -85,6 +85,31 @@ enum RouteEngine {
     ///   （原型里技能页的「当前会走」就是这么算的）。
     /// - Returns: 判定结果，永不为 nil。
     static func decide(_ text: String?) -> RouteDecision {
+        // 唯一出口加一层「用户手动指定的说话模式」。
+        //
+        // 包在 decide 上而不是包在调用点上：判定条、消息 meta、注入块、
+        // 技能页的试用面板全都走 decide，包在这里四处自动一致；分散改
+        // 调用点必然漏一处，漏出来的表现是「设置里选了简洁模式，
+        // 界面显示简洁模式，模型收到的还是逆向专家模式」。
+        applyModeOverride(rawDecide(text))
+    }
+
+    /// 用户在设置里固定了说话模式就把这个字段换掉，其余原样带回。
+    ///
+    /// `auto` 表示不干预 —— 走这条分支时返回的对象与不装这个功能完全一样，
+    /// 所以默认用户的行为没有任何变化。
+    private static func applyModeOverride(_ d: RouteDecision) -> RouteDecision {
+        let pref = RouteModePref.current
+        guard pref != "auto", pref != d.mode else { return d }
+        return RouteDecision(domain: d.domain,
+                             persona: d.persona,
+                             mode: pref,
+                             hit: d.hit,
+                             confident: d.confident,
+                             scores: d.scores)
+    }
+
+    private static func rawDecide(_ text: String?) -> RouteDecision {
         let raw = (text ?? "").lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
 
         // 匹配用的归一化文本：把空白全部压掉。

@@ -59,6 +59,12 @@ struct SessionDrawer: View {
     /// 产物总数只用于标题副行。订阅单例而不是另开入参。
     @ObservedObject private var artifacts = ArtifactStore.shared
 
+    /// 「全部产物」折叠区是否展开。纯展示状态，不回写全局。
+    ///
+    /// 设计稿（.dw-fold / toggleFold）的行为是：点入口在抽屉里展开一张
+    /// 「对话 → 产物数」的清单，再点某一行才进全屏页。不是点一下就跳走。
+    @State private var foldOpen = false
+
     var body: some View {
         VStack(spacing: 0) {
 
@@ -73,6 +79,9 @@ struct SessionDrawer: View {
             // （联动模板-完整.html 的 .dw-actions）是紧贴搜索框下方一行居中。
             // 底部那条会随列表长度浮动，越长的列表越难够到；放上面是固定位置。
             entryRow
+
+            // ── 产物折叠区（点「全部产物」在同页展开） ──
+            artifactFold
 
             // ── 列表 ──
             ScrollView {
@@ -479,7 +488,9 @@ struct SessionDrawer: View {
     /// 设计稿把它固定在搜索框下面，位置不随列表长度漂。
     private var entryRow: some View {
         HStack(spacing: 10) {
-            Button(action: onOpenAllArtifacts) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.22)) { foldOpen.toggle() }
+            } label: {
                 HStack(spacing: 7) {
                     // 图标 + 右上角数量角标。角标单独叠一层而不是塞进 HStack，
                     // 塞进去会把「全部产物」四个字挤掉（设计稿注释原话）。
@@ -515,6 +526,8 @@ struct SessionDrawer: View {
                     Image(systemName: "chevron.right")
                         .font(.system(size: 9, weight: .semibold))
                         .foregroundStyle(Color(.tertiaryLabel))
+                        // 展开时转 90°，和设计稿 .dw-entry.expanded .caret 一致。
+                        .rotationEffect(.degrees(foldOpen ? 90 : 0))
                 }
                 .padding(.horizontal, 12)
                 .frame(maxWidth: .infinity, minHeight: 46)
@@ -554,6 +567,83 @@ struct SessionDrawer: View {
         }
         .padding(.horizontal, 18)
         .padding(.bottom, 10)
+    }
+
+    // MARK: 产物折叠区
+
+    /// 点「全部产物」在抽屉里展开的「对话 → 产物数」清单。
+    ///
+    /// 行为照设计稿的 toggleFold / renderFold：
+    ///   点入口 → 同页展开（不跳走）；点某一行 → 关抽屉、进全屏产物页。
+    ///
+    /// 这一点和原版差别最大：原版是点一下直接关抽屉跳全屏页，中间没有
+    /// 「哪个对话有几个产物」这一层。稿子把这一层放在抽屉里，是为了让人
+    /// 先看见再决定进哪个。
+    ///
+    /// 高度封顶 282（稿子 .dw-fold.open 的 max-height），超了自己滚 ——
+    /// 这一层和外层会话列表是两个兄弟 ScrollView，不是嵌套，滚动手势
+    /// 不会打架。
+    @ViewBuilder
+    private var artifactFold: some View {
+        if foldOpen {
+            let groups = artifacts.groups
+            ScrollView {
+                VStack(spacing: 0) {
+                    if groups.isEmpty {
+                        Text("还没有产物")
+                            .font(.system(size: 12.5))
+                            .foregroundStyle(Color(.secondaryLabel))
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 16)
+                    } else {
+                        ForEach(Array(groups.enumerated()), id: \.element.id) { idx, g in
+                            Button {
+                                // 和稿子一样：先关抽屉，再进全屏页。
+                                drawerState.close()
+                                onOpenAllArtifacts()
+                            } label: {
+                                HStack(spacing: 10) {
+                                    Image(systemName: "folder")
+                                        .font(.system(size: 12, weight: .medium))
+                                        .foregroundStyle(Color(.systemIndigo))
+                                        .frame(width: 26, height: 26)
+                                        .background(Color(.systemIndigo).opacity(0.10),
+                                                    in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+
+                                    Text(g.title)
+                                        .font(.system(size: 14))
+                                        .foregroundStyle(Color(.label))
+                                        .lineLimit(1)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+
+                                    Text("\(g.items.count)")
+                                        .font(.system(size: 11.5).monospacedDigit())
+                                        .foregroundStyle(Color(.tertiaryLabel))
+                                }
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 10)
+                                .contentShape(Rectangle())
+                                .overlay(alignment: .top) {
+                                    if idx > 0 {
+                                        Rectangle()
+                                            .fill(Color(.separator).opacity(0.5))
+                                            .frame(height: 0.5)
+                                            .padding(.leading, 34)
+                                    }
+                                }
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+            }
+            .frame(maxHeight: 282)
+            .background(Color(.secondarySystemGroupedBackground),
+                        in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .padding(.horizontal, 18)
+            .padding(.bottom, 6)
+            .transition(.opacity.combined(with: .move(edge: .top)))
+        }
     }
 }
 

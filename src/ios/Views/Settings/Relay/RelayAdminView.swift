@@ -138,39 +138,31 @@ struct RelayAdminView: View {
         }
     }
 
+    /// 没密码时的占位。
+    ///
+    /// [R33-直填] 原来这里是「还没有后台密码 + 去设置」两行字加一个跳转按钮。
+    /// 用户要求取消这一步：进页面就能填地址和密码，填一次就记住。
+    /// 现在直接嵌 `RelayQuickSetupForm`（与路由器页同一份，含外网地址）。
     private var placeholder: some View {
-        VStack(spacing: 14) {
-            if route == nil {
-                ProgressView()
-                Text("正在判定线路…")
-                    .font(.footnote)
-                    .foregroundColor(.secondary)
-            } else {
-                Image(systemName: "key.slash")
-                    .font(.system(size: 34))
-                    .foregroundColor(.secondary)
-                Text("还没有后台密码")
-                    .font(.subheadline.weight(.medium))
-                Text("填一次就会加密存在这台手机上，以后不用再输。")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 40)
-                Button {
-                    showSettings = true
-                } label: {
-                    Text("去设置")
-                        .font(.footnote.weight(.medium))
-                        .padding(.horizontal, 22)
-                        .padding(.vertical, 9)
-                        .background(Color.accentColor.opacity(0.12))
-                        .foregroundColor(.accentColor)
-                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        ScrollView {
+            VStack(spacing: 14) {
+                if route == nil {
+                    ProgressView()
+                        .padding(.top, 60)
+                    Text("正在判定线路…")
+                        .font(.footnote)
+                        .foregroundColor(.secondary)
+                } else {
+                    RelayQuickSetupForm {
+                        await store.refresh()
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.top, 20)
                 }
-                .buttonStyle(.plain)
             }
+            .frame(maxWidth: .infinity)
+            .padding(.bottom, 24)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(.systemGroupedBackground))
     }
 

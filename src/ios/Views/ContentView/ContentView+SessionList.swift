@@ -285,7 +285,10 @@ extension ContentView {
         .modifier(ScrollPhaseProbe())
         #endif
         .opacity(didInitialLoad ? 1 : 0)
-        .overlay { if didInitialLoad, filteredSessions.isEmpty, !isSearching { emptyState } }
+        // [R33-去引导页] 这里原本覆盖「欢迎使用 Minis / 添加 AI 服务商 /
+        // 选择模型 / 开始对话」那张三步引导。用户明确要求删掉它：
+        // 进 App 就该看见原版聊天界面，不要被一整页引导挡住。
+        // 空列表照样能左滑出抽屉、点右下角齿轮配 API。
         .overlay(alignment: .top) { folderMiniBarOverlay(scrollProxy) }
         .safeAreaInset(edge: .bottom) {
             if isSelecting { selectionToolbar }
@@ -377,7 +380,7 @@ extension ContentView {
         // of sessionList) is unaffected and does not get it.
         .modifier(MacOS27OpaqueNavigationBar(background: Material.bar))
         .opacity(didInitialLoad ? 1 : 0)
-        .overlay { if didInitialLoad, displaySessions.isEmpty, !isSearching { emptyState } }
+        // [R33-去引导页] 同 iPhone 分支：不再覆盖三步引导页。
         .overlay(alignment: .top) { folderMiniBarOverlay(scrollProxy) }
         .safeAreaInset(edge: .bottom) {
             if isSelecting { selectionToolbar }
