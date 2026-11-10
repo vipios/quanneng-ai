@@ -226,6 +226,20 @@ extension AIChatViewModel {
             userSystemPrompt += "\n\n" + behaviorFragment
         }
 
+        // [T-auto-route-inject] 自动路由判定接进链路 —— 这是原本断掉的那一环。
+        //
+        // 在这之前 RouteEngine.decide() 写好了、也进了 pbxproj 的 Sources，
+        // 但 0 个外部引用：判得出三元组，却没有任何地方把它交给模型，
+        // 于是「一句话 → 域/人格/模式 → 设备档 → prompt」只有第一环。
+        //
+        // 位置在技能片段之前：能力域决定了技能 references 该偏向哪一份，
+        // 让模型先读到「这是什么活、目标是哪台机器」，再去读技能清单，
+        // 挑 references 时才有的放矢。反过来放，两份信息就打不起来。
+        //
+        // 判不出来时 promptFragment 返回空串（比如定时任务的空触发），
+        // 这时不往 prompt 里塞空段落。
+        userSystemPrompt += RouteInjector.promptFragment(for: agentHistory)
+
         // Inject enabled skill metadata into system prompt
         // [T-p1-delegate-task] A helper inherits the PARENT session's skill
         // and MCP enablement (the user configured those for the conversation
@@ -1077,6 +1091,11 @@ extension AIChatViewModel {
                 if let behaviorFragment = newEntry.model.agentBehaviorPromptFragment {
                     userSystemPrompt += "\n\n" + behaviorFragment
                 }
+                // [T-auto-route-inject] 与首轮注入点同源：换了 provider 不该
+                // 丢掉本轮的自动判定。判定只依赖用户输入和词表，跟模型无关，
+                // 所以这里重算一遍结果必然与首轮一致 —— 重算而不是缓存传参，
+                // 是因为 fallback 路径拿不到首轮那个局部变量。
+                userSystemPrompt += RouteInjector.promptFragment(for: agentHistory)
                 // [T-ios-helper-fallback-parent-skills] Same key as the setup
                 // path: a helper uses its PARENT's skill / MCP enablement.
                 // Keying on the child id here made a sub-agent that fell back

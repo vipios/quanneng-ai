@@ -313,3 +313,123 @@ enum RouteMode {
 
     static func name(_ id: String) -> String { names[id] ?? id }
 }
+
+// MARK: - 设备档位（R31 §4）
+
+/// 一个能力域的任务，目标机是哪一台。
+///
+/// 上一版是二分法：判到移动端/逆向/免杀/样本 → 报 iPhone；判到路由器/Web/云 → 报路由器；
+/// **其余全部兜底报 iPhone**。实测下来写 pwn 脚本、域渗透、挖 CVE、看样本、内存取证、
+/// 游戏外挂、口令破解、社工、靶场、方法论这 10 个域都在硬报「iPhone · arm64e · RootHide」。
+///
+/// 问题在于这些任务的目标机通常不是那台手机。写 pwn 脚本时给它一句「目标机是 arm64e/iOS」，
+/// 它可能真按 arm64e 去算偏移、按 iOS 去挑 gadget。**错的前提比没前提更难发现**，
+/// 所以三档制里 C 档明确说「不在这两台机器上」，而不是沉默地报一台。
+///
+/// 对应 `原型/lib/route-rules.js` 的 `DEV_SCOPE_IPHONE` / `DEV_SCOPE_ROUTER` /
+/// `deviceScopeOf()`，两边必须一致（`实测/check-routes.py` 会比对）。
+enum DeviceScope: String {
+    /// A 档 · 任务就在这台 iPhone 上
+    case iphone
+    /// B 档 · 任务落在那台路由器 / 那台机器的网络侧
+    case router
+    /// C 档 · 本机只是操作端，目标在别处 —— 不给设备行
+    case none
+}
+
+enum DeviceScopeRules {
+
+    /// A 档只放两个域，比二分法那一版收紧了一档。
+    ///
+    /// 收紧的理由：「免杀与对抗」「样本分析」不算 iPhone 相关 —— 免杀的主战场是
+    /// Windows 的 EDR/AV，样本可能是任意平台的 PE / ELF，都不落在这台手机上。
+    /// 收紧不会漏掉 iOS 样本：样本若带 `ipa` / `dylib`，`移动端` 域的词长权重更高，
+    /// 会把判定先抢走（实测「帮我破解这个 ipa」→ 移动端）。
+    static let iphone: Set<String> = ["移动端", "逆向与二进制"]
+
+    /// B 档 · 任务落在那台路由器 / 那台机器的网络侧
+    static let router: Set<String> = [
+        "路由器与中转站", "Web 与 API", "云与容器", "侦察与测绘",
+        "协议分析", "数据渗出与 C2",
+    ]
+
+    /// C 档不单独存表 —— 没被上面两张表收进去的域，全部归 C。
+    /// 这样新增能力域时默认落到「目标在别处」，是最安全的默认值：
+    /// 漏报一台机器的规格，远好过给 AI 一个错的前提。
+    static func scope(of domain: String) -> DeviceScope {
+        if iphone.contains(domain) { return .iphone }
+        if router.contains(domain) { return .router }
+        return .none
+    }
+}
+
+// MARK: - 设备上下文（R31 §3，零真值）
+
+/// 判定结果该带哪些设备事实。
+///
+/// **v4.0 起任何档位都不给真值**：机型、系统版本、越狱形态、注入路径、插件清单、
+/// 地址、账号全部不预置。理由两句话 ——
+///   ① 会漂：装一个包、打一个补丁，上一轮的统计就全变；旧数字比没数字更坑。
+///   ② 泄露面：这些值组合起来足以指纹化一台特定设备，源码外流时写了什么就露什么。
+///
+/// 用户 2026-11-09 18:51 的原话：
+///   「完全没有必要，如果到时候有什么问题，我直接告诉他查我的手机所有的信息就完了呗，
+///     这样只有我和ai知道这个事，外人无法获取」
+///
+/// 所以这里给的是「这类活该查什么、怎么查」，不是「这台机器是什么」。
+/// 对应 `原型/lib/route-rules.js` 的 `deviceContextOf()`。
+struct DeviceContext {
+    /// 命中的档位（最多一个；C 档为空）
+    let scopes: [DeviceScope]
+    /// 一句话结论，直接进上下文
+    let note: String
+    /// 「该查什么、怎么查」的提示行
+    let hints: [String]
+
+    /// 拼成一段可注入 system prompt 的文本。
+    ///
+    /// 不拼成表格、不用 markdown 列表符号堆砌 —— 这段会被塞进每轮对话的上下文里，
+    /// 每多一个字符都在挤真正干活的空间。用最短的句子说清三件事：
+    /// 目标是什么机器、信息从哪来、别用旧值。
+    var promptText: String {
+        var lines: [String] = []
+        lines.append(note)
+        for h in hints { lines.append("- " + h) }
+        return lines.joined(separator: "\n")
+    }
+}
+
+enum DeviceContextBuilder {
+
+    /// 按路由结果挑该带哪些设备事实。不是全量倒给 AI —— 全量会撑爆上下文，
+    /// 也会让无关信息干扰判断。
+    static func context(for decision: RouteDecision) -> DeviceContext {
+        let scope = DeviceScopeRules.scope(of: decision.domain)
+        var scopes: [DeviceScope] = []
+        if scope != .none { scopes.append(scope) }
+
+        var hints: [String] = []
+        var note: String
+
+        switch scope {
+        case .iphone:
+            note = "目标机是 iPhone。型号 / 系统 / 架构 / 越狱形态 / 注入链 / 已装插件 —— 全部现场查，不预置。"
+            hints = [
+                "查法：SSH 进去跑 uname -a、sysctl -n hw.memsize、dpkg -l、readlink /var/jb",
+                "数值会漂，别用上一轮的旧数字下判断",
+            ]
+        case .router:
+            note = "目标机是路由器。型号 / 系统 / 内存 / 地址 —— 全部现场查，不预置。"
+            hints = [
+                "查法：SSH 进去读 /proc/meminfo、ip addr、df -h",
+                "可用内存是那类机器的硬瓶颈，上新服务前先看实际值",
+            ]
+        case .none:
+            // 空 scopes 时给一句说明，而不是硬塞一台机器的规格。
+            // 让 AI 知道「手上这两台都不是这个活的目标」，比让它自己猜要好。
+            note = "本机是操作端，不是这个任务的目标；不提供设备信息。"
+        }
+
+        return DeviceContext(scopes: scopes, note: note, hints: hints)
+    }
+}

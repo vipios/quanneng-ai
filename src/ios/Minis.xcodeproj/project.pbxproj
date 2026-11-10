@@ -643,6 +643,7 @@
 		FD2A00000000000000000004 /* ContentView+Drawer.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD1A00000000000000000004 /* ContentView+Drawer.swift */; };
 		FF2A00000000000000000001 /* RouteEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF1A00000000000000000001 /* RouteEngine.swift */; };
 		FF2A00000000000000000002 /* RouteRules.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF1A00000000000000000002 /* RouteRules.swift */; };
+		FF2A00000000000000000003 /* RouteInjector.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF1A00000000000000000003 /* RouteInjector.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -1489,6 +1490,7 @@
 		FD1A00000000000000000004 /* ContentView+Drawer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ContentView+Drawer.swift"; sourceTree = "<group>"; };
 		FF1A00000000000000000001 /* RouteEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RouteEngine.swift; sourceTree = "<group>"; };
 		FF1A00000000000000000002 /* RouteRules.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RouteRules.swift; sourceTree = "<group>"; };
+		FF1A00000000000000000003 /* RouteInjector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RouteInjector.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -2801,6 +2803,7 @@
 			children = (
 				FF1A00000000000000000001 /* RouteEngine.swift */,
 				FF1A00000000000000000002 /* RouteRules.swift */,
+				FF1A00000000000000000003 /* RouteInjector.swift */,
 			);
 			path = Domain;
 			sourceTree = "<group>";
@@ -3198,6 +3201,7 @@
 			files = (
 				FF2A00000000000000000001 /* RouteEngine.swift in Sources */,
 				FF2A00000000000000000002 /* RouteRules.swift in Sources */,
+				FF2A00000000000000000003 /* RouteInjector.swift in Sources */,
 				FD2A00000000000000000001 /* EdgeDrawer.swift in Sources */,
 				FD2A00000000000000000002 /* SessionDrawer.swift in Sources */,
 				FD2A00000000000000000003 /* AllArtifactsView.swift in Sources */,

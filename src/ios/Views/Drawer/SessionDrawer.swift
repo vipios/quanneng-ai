@@ -138,8 +138,17 @@ struct SessionDrawer: View {
     // MARK: 标题
 
     private var titleBar: some View {
-        HStack(alignment: .top, spacing: 10) {
-            VStack(alignment: .leading, spacing: 1) {
+        // 标题居中，关闭按钮浮在右侧 —— 用 ZStack 而不是 HStack + Spacer。
+        //
+        // 为什么不能用 HStack：
+        //   HStack { 标题; Spacer(); 关闭按钮 } 里，标题的居中位置取决于
+        //   右侧按钮的宽度。按钮 28pt + 右 padding，标题就会被推得偏离
+        //   真正的中线约 19pt。改 Spacer 权重只能凑近似值，换个字号又歪。
+        //
+        // 用 ZStack 后两件事解耦：标题按整条宽度居中（不管右边有没有按钮），
+        // 按钮单独贴右。这样以后加第二个按钮也不会再动标题的位置。
+        ZStack {
+            VStack(spacing: 1) {
                 Text(sidebarTitle)
                     .font(.system(size: 26, weight: .bold))
                     .lineLimit(1)
@@ -148,21 +157,33 @@ struct SessionDrawer: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
-            Spacer(minLength: 0)
+            // 居中容器要占满宽度，否则 ZStack 按内容宽度居中，
+            // 标题会挤在左侧按钮旁边而不是整条的中线。
+            .frame(maxWidth: .infinity)
+            // 标题左右各留出关闭按钮的 28pt + 一点间隙，长标题才不会被
+            // 按钮压住。注意这是**对称**的，所以中线不偏 —— 只在右侧留
+            // 就会把标题往左推，居中又白做了。
+            .padding(.horizontal, 36)
 
-            Button {
-                drawerState.close()
-            } label: {
-                Image(systemName: "xmark")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 28, height: 28)
-                    .background(Color(.tertiarySystemFill), in: Circle())
+            HStack {
+                Spacer(minLength: 0)
+                Button {
+                    drawerState.close()
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 28, height: 28)
+                        .background(Color(.tertiarySystemFill), in: Circle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("关闭抽屉")
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel("关闭抽屉")
         }
-        .padding(.horizontal, 16)
+        // 左右留一样的内边距：居中是对称留白算出来的中线，两侧不等就偏。
+        // 这里右侧还要额外让出关闭按钮的 28pt，否则长标题会顶到按钮下面。
+        .padding(.leading, 16)
+        .padding(.trailing, 16)
         .padding(.top, 6)
         .padding(.bottom, 10)
     }
