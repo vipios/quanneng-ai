@@ -481,18 +481,23 @@ jobs:
           # 命令行 KEY=VALUE 和工程文件，不认环境变量。下面这三条才是
           # 真正把它压下来的开关。
           #
-          #   1. SWIFT_COMPILATION_MODE=singlefile
+          #   1. SWIFT_COMPILATION_MODE=incremental
           #      pbxproj 的 project 级 Release 写的是 wholemodule。WMO 下
           #      **一个** frontend 进程要同时持有全部 669 个文件的 AST，
           #      中途无法回收；-jobs 在这种模式下完全无效（压根没有第二个
-          #      job）。改成 singlefile 后，xcodebuild 会把文件切成多个
-          #      batch，每个 batch 编完就释放，峰值内存按 batch 大小决定。
-          #      代价是全模块优化变弱（跨文件内联减少）。Release 包体积会
-          #      略大、性能略降，但这是 7GB runner 上能出包的唯一路子。
+          #      job）—— 这是 run #15/#16/#24 被 OOM 杀的根因。
+          #      早先为躲 OOM 改成 singlefile：文件切成多个 batch 各自
+          #      独立类型检查，内存是下来了，但 AIChatView 这种 1900+ 行
+          #      的巨型 struct 被**单独**顶破类型推断预算，连续报
+          #      "unable to type-check ... in reasonable time"，且报错行号
+          #      每次随机游走（1410→1470→1510→1398）。
+          #      改 incremental 是两害相权的平衡点：按文件增量编译，类型
+          #      检查比 singlefile 宽松（有跨文件上下文分担），内存又远低于
+          #      wholemodule。代价是优化弱于 WMO，但 7GB runner 上出包优先。
           #      要回全量优化，得换更大的 runner，不是加参数。
           #
           #   2. SWIFT_DRIVER_JOBS=1 / SWIFT_EXEC 并发
-          #      singlefile 模式下 xcodebuild 会并行开多个 frontend。
+          #      incremental 模式下 xcodebuild 也会并行开多个 frontend。
           #      SWIFT_DRIVER_JOBS 限住一个 driver 内部并行几个；
           #      -jobs 限住同时跑几个构建任务。两个都压到 1–2，
           #      峰值 = 2 batch 并发 ≈ 1.5–2GB，7GB 装得下。
@@ -524,7 +529,7 @@ jobs:
             CODE_SIGN_IDENTITY="" \
             CODE_SIGN_ENTITLEMENTS="" \
             ENABLE_BITCODE=NO \
-            SWIFT_COMPILATION_MODE=singlefile \
+            SWIFT_COMPILATION_MODE=incremental \
             SWIFT_DRIVER_JOBS=2 \
             build 2>&1 | tee build.log | tail -150
 

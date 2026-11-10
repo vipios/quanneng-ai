@@ -1395,7 +1395,10 @@ struct AIChatView: View {
         }
         .onChange(of: shareCoordinator.bufferVersion) { newVersion in
             // Warm start: user is already in a session when share arrives
-            minisLogger.info("[Share] AIChatView.onChange(bufferVersion)=\(newVersion) sessionId=\(sessionId ?? "nil") draftId=\(draftId ?? "nil") hasBuffer=\(shareCoordinator.pendingShareBuffer != nil)")
+            let shareSid = sessionId ?? "nil"
+            let shareDraft = draftId ?? "nil"
+            let shareHasBuffer = shareCoordinator.pendingShareBuffer != nil
+            minisLogger.info("[Share] AIChatView.onChange(bufferVersion)=\(newVersion) sessionId=\(shareSid) draftId=\(shareDraft) hasBuffer=\(shareHasBuffer)")
             injectPendingShareIfNeeded()
         }
         // [T-pop-keyboard-flash-home] Release the keyboard when the pop starts
