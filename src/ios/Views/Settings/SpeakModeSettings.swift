@@ -172,7 +172,7 @@ struct SpeakModeSettingsView: View {
         .padding(14)
         .background(
             RoundedRectangle(cornerRadius: 13, style: .continuous)
-                .fill(isOn ? Color(SettingsDesign.blue).opacity(0.04) : Color(uiColor: .secondarySystemGroupedBackground))
+                .fill(isOn ? SettingsDesign.blue.opacity(0.04) : Color(uiColor: .secondarySystemGroupedBackground))
         )
         .overlay(
             RoundedRectangle(cornerRadius: 13, style: .continuous)

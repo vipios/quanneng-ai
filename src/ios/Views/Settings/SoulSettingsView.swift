@@ -187,7 +187,7 @@ struct SoulSettingsView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: 13, style: .continuous)
-                .fill(isOn ? Color(SettingsDesign.blue).opacity(0.04) : Color(uiColor: .secondarySystemGroupedBackground))
+                .fill(isOn ? SettingsDesign.blue.opacity(0.04) : Color(uiColor: .secondarySystemGroupedBackground))
         )
         .overlay(alignment: .leading) {
             // 左侧色条
