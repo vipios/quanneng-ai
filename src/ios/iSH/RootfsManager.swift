@@ -744,7 +744,13 @@ class RootfsManager {
     /// 为什么不用 `compression_decode_buffer`（原来那个）：
     /// 它要求目标缓冲一次性开到 `expectedSize` 那么大，等于又把整个文件
     /// 摆回了内存里。`compression_stream` 是增量的，块大小我们自己定。
-    private func extractEntryStreaming(_ entry: Entry,
+    ///
+    /// [R58-fix] 参数类型必须写全限定名 `ZIPArchive.Entry`：
+    /// `Entry` 是嵌套在 `ZIPArchive` 里的类型，而本函数属于 `RootfsManager`
+    /// （定义在 `ZIPArchive` 之前）。裸写 `Entry` 在 `RootfsManager` 作用域里
+    /// 是找不到的 —— 上一版就是这样，CI 报
+    ///   error: cannot find type 'Entry' in scope
+    private func extractEntryStreaming(_ entry: ZIPArchive.Entry,
                                        from archive: ZIPArchive,
                                        to destination: URL) throws {
         let fm = FileManager.default
@@ -1005,6 +1011,8 @@ private class ZIPArchive {
             src_size: 0,
             state: nil
         )
+        // COMPRESSION_ZLIB 在 Compression 框架里就是 compression_algorithm
+        // 类型（不是 Int32），直接传即可，不需要转换。
         let initStatus = compression_stream_init(&stream, COMPRESSION_STREAM_DECODE, COMPRESSION_ZLIB)
         guard initStatus == COMPRESSION_STATUS_OK else {
             throw ZIPStreamError.streamInit(initStatus.rawValue)
