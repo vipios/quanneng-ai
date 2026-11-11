@@ -765,8 +765,12 @@ PYEOF
              dpkg dpkg-deb fakeroot zip unzip curl python3 \
              tar zstd file openssl \
              llvm-objdump llvm-nm llvm-objcopy llvm-strip llvm-lipo; do
-        # 软链也要能解析到真实文件才算存在
-        if [ ! -e "$ROOTFS_DATA/usr/bin/$t" ] && [ ! -e "$ROOTFS_DATA/usr/local/bin/$t" ]; then
+        # 软链也要能解析到真实文件才算存在。
+        # [R58-fix] 要查三个位置：tar / zstd 这类在 /bin 而不是 /usr/bin，
+        # 只查 /usr/bin 会误报「工具没找到」，让人以为装失败了。
+        if [ ! -e "$ROOTFS_DATA/usr/bin/$t" ] \
+        && [ ! -e "$ROOTFS_DATA/bin/$t" ] \
+        && [ ! -e "$ROOTFS_DATA/usr/local/bin/$t" ]; then
             missing_tools+=("$t")
         fi
     done
