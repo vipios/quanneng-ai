@@ -329,7 +329,7 @@ struct SettingsSheet: View {
                 } label: {
                     SettingsRowContent(
                         title: AnyView(SettingsRowLabel(.modes,
-                                                        fallback: "说话模式")),
+                                                        fallback: "语气")),
                         symbol: "text.bubble.fill",
                         iconTint: SettingsDesign.orange
                     )

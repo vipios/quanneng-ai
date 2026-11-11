@@ -510,21 +510,20 @@ private struct EdgePanOverlay: UIViewRepresentable {
         /// 之前多版「挖洞不够」的根因都是取到 0 或偏小，返回键热区
         /// （44×44，中心在导航栏，实际从 y≈statusBar 延伸到 statusBar+44）
         /// 的下半段仍落在手势层里。
-        /// [R53] 导航栏底界，Coordinator 判断「起手点是否在导航栏」也要用，
-        /// 所以不是 private。
+        /// [R55-返回键·必中挖洞] 导航栏底界。
+        ///
+        /// 之前多版「挖洞不够」的复盘：keyWindow 在某些时序下返回的
+        /// safeAreaInsets.top 是 0（window 场景切换/尚未 layout），
+        /// 挖出来的高度只剩 56，而返回键在 y≈95 —— 只有 y<56 能点，
+        /// 完美对应「要点图标上方才有反应」。
+        ///
+        /// 这次不再猜：直接用固定值。iPhone 全系导航栏底最深 103
+        /// （刘海/灵动岛机型 = 59 状态栏 + 44 导航栏），返回键 44×44
+        /// 热区往下多算 17pt 余量 = 120。iPad 状态栏 24 + 44 = 68，
+        /// 同样被 120 覆盖。多放行的这一条窄带（y 103~120）里没有
+        /// 可点内容，误伤成本为零。
         var navBarBottom: CGFloat {
-            let keyWindow = UIApplication.shared.connectedScenes
-                .compactMap { $0 as? UIWindowScene }
-                .flatMap(\.windows)
-                .first(where: \.isKeyWindow)
-            let top = keyWindow?.safeAreaInsets.top
-                ?? window?.safeAreaInsets.top
-                ?? 59
-            // 状态栏 + 导航栏 44 + 返回键热区向下延伸的余量。
-            // 导航栏在 iOS 16-26 都是 44pt（液态玻璃也是），
-            // 返回键 44×44 热区中心在导航栏内，不会伸到导航栏底以下，
-            // 但 +12 余量让「手指按在返回键略偏下」也放行。
-            return top + 56
+            return 120
         }
 
         override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {

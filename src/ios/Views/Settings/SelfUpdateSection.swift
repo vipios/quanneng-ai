@@ -207,6 +207,8 @@ struct SelfUpdateSection: View {
     }
 
     private var percentText: String {
+        // [R55] progress < 0 表示「在下载但不知道总量」，别显示 0%。
+        if progress < 0 { return "下载中…" }
         let mb = Double(totalBytes) / 1_048_576
         if mb < 0.1 { return "\(Int(progress * 100))%" }
         return "\(Int(progress * 100))%  \(String(format: "%.0f", mb))MB"

@@ -535,6 +535,8 @@ jobs:
             ENABLE_BITCODE=NO \
             SWIFT_COMPILATION_MODE=incremental \
             SWIFT_DRIVER_JOBS=2 \
+            MARKETING_VERSION="1.${{ github.run_number }}" \
+            CURRENT_PROJECT_VERSION="${{ github.run_number }}" \
             build 2>&1 | tee build.log | tail -150
 
       # ── 6.5 判死因：OOM 还是代码错 ──
@@ -1037,7 +1039,7 @@ jobs:
           cp "$IPA" "out/QuanNengAI-1.0.ipa"
 
           NOTE="${{ inputs.note }}"
-          if [ -z "$NOTE" ]; then NOTE="build ${{ github.run_number }}"; fi
+          if [ -z "$NOTE" ]; then NOTE="全能AI 1.${{ github.run_number }}"; fi
 
           # latest 这个 tag 已存在就直接更新资产，不存在就建。
           # 用 --clobber 覆盖同名资产，避免「资产已存在」报错。
@@ -1045,7 +1047,7 @@ jobs:
             echo "更新已有的 latest release"
             gh release edit latest \
               --repo "${{ github.repository }}" \
-              --title "全能AI 1.0 · build ${{ github.run_number }}" \
+              --title "全能AI 1.${{ github.run_number }}" \
               --notes "$NOTE"
             gh release upload latest "out/QuanNengAI-1.0.ipa" \
               --repo "${{ github.repository }}" --clobber
@@ -1053,7 +1055,7 @@ jobs:
             echo "创建 latest release"
             gh release create latest "out/QuanNengAI-1.0.ipa" \
               --repo "${{ github.repository }}" \
-              --title "全能AI 1.0 · build ${{ github.run_number }}" \
+              --title "全能AI 1.${{ github.run_number }}" \
               --notes "$NOTE" \
               --latest
           fi

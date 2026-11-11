@@ -91,18 +91,31 @@ enum SelfUpdate {
 
     // MARK: 版本线
 
-    /// 我们自己的版本号。**不从 Bundle 读**。
+    /// [R55-版本号递增] 从 Bundle 读版本号，不再写死。
     ///
-    /// 理由：Bundle 里的值随构建配置变，而「跟谁比自己」这件事必须
-    /// 只有一处定义。pbxproj 里的 1.0 与此处的常量必须同步。
-    static let currentVersion: [Int] = [1, 0, 0]
+    /// 之前 `currentVersion=[1,0,0]`、`currentBuild=42` 是硬编码，CI 每次
+    /// 发布用 run_number 递增（build 64、65…），App 里却永远显示 1.0.0(42)，
+    /// 用户装完看不出是不是最新。现在 CI 编译时把 run_number 注入
+    /// `MARKETING_VERSION`/`CURRENT_PROJECT_VERSION`（见 build.yml），
+    /// 这里从 Info.plist 读回来，两边就对上了。
+    ///
+    /// 显示格式：`1.65`（主版本 1 + 构建号 65），一眼能看出递增。
+    static var currentVersion: [Int] {
+        let raw = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+            ?? "1.0.0"
+        return raw.split(separator: ".").compactMap { Int($0) }
+    }
 
-    /// 构建号。显示用，不参与版本比较。
-    static let currentBuild: Int = 42
+    /// 构建号 = CFBundleVersion（CI 注入的 run_number）。读不到回落 0。
+    static var currentBuild: Int {
+        let raw = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "0"
+        return Int(raw) ?? 0
+    }
 
-    /// 界面上显示的完整版本串
+    /// 界面上显示的完整版本串。
+    /// [R55] 只显示版本号（如 1.65），不带括号里的构建号。
     static var displayVersion: String {
-        "\(currentVersion.map(String.init).joined(separator: ".")) (\(currentBuild))"
+        currentVersion.map(String.init).joined(separator: ".")
     }
 
     // MARK: 内置更新源
@@ -304,11 +317,16 @@ enum SelfUpdate {
                 : tagRaw
             let ms = Int(Date().timeIntervalSince(t0) * 1000)
 
-            // [R50] release 的 title 形如「全能AI 1.0 · build 58」，
-            // 取它的 build 号给界面显示。拿不到就回落 tag。
+            // [R55] release 的 title 形如「全能AI 1.65」（版本号 = run_number）。
+            // 直接把 title 里的版本段给界面显示。拿不到就回落 tag。
             let name = obj["name"] as? String ?? ""
             let buildLabel: String
-            if let m = name.range(of: "build", options: .caseInsensitive) {
+            if let m = name.range(of: "全能AI", options: []) {
+                let tail = name[m.upperBound...].trimmingCharacters(in: .whitespaces)
+                // tail 形如 "1.65"，去掉可能的 "· " 前缀
+                let cleaned = tail.hasPrefix("·") ? String(tail.dropFirst()).trimmingCharacters(in: .whitespaces) : tail
+                buildLabel = cleaned.isEmpty ? "v\(tag)" : "v\(cleaned)"
+            } else if let m = name.range(of: "build", options: .caseInsensitive) {
                 let tail = name[m.upperBound...].trimmingCharacters(in: .whitespaces)
                 let num = tail.prefix(while: { $0.isNumber })
                 buildLabel = num.isEmpty ? "v\(tag)" : "build \(num)"
@@ -382,6 +400,9 @@ enum SelfUpdate {
         req.setValue("Minis-SelfUpdate", forHTTPHeaderField: "User-Agent")
 
         let delegate = ProgressDelegate(onProgress: onProgress)
+        // [R55] 兜底总量用 release 里的 asset.size —— 代理不返回
+        // Content-Length 时，进度用它来算百分比，不会一直转圈。
+        delegate.setExpectedFallback(win.ipaSize)
 
         let cfg = URLSessionConfiguration.default
         cfg.timeoutIntervalForRequest = req.timeoutInterval
@@ -469,6 +490,11 @@ private final class ProgressDelegate: NSObject, URLSessionDownloadDelegate, @unc
     private let onProgress: @Sendable (Double, Int64) -> Void
     private let lock = NSLock()
     private var stopped = false
+    /// 兜底进度用的「预期总量」。代理（ghfast/ghproxy 等）经常不返回
+    /// Content-Length，`totalBytesExpectedToWrite` 恒为 -1，拿它算进度
+    /// 永远得 0。这里记最后一次已知总量，配合 download 侧在响应里读
+    /// Content-Length 补上（见 `download` 里对 resp 的处理）。
+    private var expectedFallback: Int64 = 0
 
     init(onProgress: @escaping @Sendable (Double, Int64) -> Void) {
         self.onProgress = onProgress
@@ -478,15 +504,27 @@ private final class ProgressDelegate: NSObject, URLSessionDownloadDelegate, @unc
         lock.lock(); stopped = true; lock.unlock()
     }
 
+    /// [R55] 下载开始后、或响应头已知但没 Content-Length 时，给一个
+    /// 「预期总量」用于兜底进度（通常是 asset.size，见 Win.ipaSize）。
+    func setExpectedFallback(_ total: Int64) {
+        lock.lock(); expectedFallback = total; lock.unlock()
+    }
+
     func urlSession(_ session: URLSession,
                     downloadTask: URLSessionDownloadTask,
                     didWriteData bytesWritten: Int64,
                     totalBytesWritten: Int64,
                     totalBytesExpectedToWrite: Int64) {
-        lock.lock(); let s = stopped; lock.unlock()
-        guard !s, totalBytesExpectedToWrite > 0 else { return }
-        let p = Double(totalBytesWritten) / Double(totalBytesExpectedToWrite)
-        onProgress(min(max(p, 0), 1), totalBytesExpectedToWrite)
+        lock.lock(); let s = stopped; let expected = expectedFallback; lock.unlock()
+        guard !s else { return }
+        let total = totalBytesExpectedToWrite > 0 ? totalBytesExpectedToWrite : expected
+        guard total > 0 else {
+            // 完全没有总量信息：至少给个「在动」的信号，别让界面以为卡死。
+            onProgress(-1, 0)
+            return
+        }
+        let p = Double(totalBytesWritten) / Double(total)
+        onProgress(min(max(p, 0), 1), total)
     }
 
     func urlSession(_ session: URLSession,

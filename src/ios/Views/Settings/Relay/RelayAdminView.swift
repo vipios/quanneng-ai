@@ -581,7 +581,19 @@ private struct RelayWebContainer: UIViewRepresentable {
             'table.rltab,table.models-table,.doc-tbl{table-layout:auto !important;width:max-content !important;min-width:100% !important}',
             'table.models-table td,table.models-table th,table.rltab td,table.rltab th{white-space:nowrap !important}',
 
-            /* ③ 装表格的容器成为横向滚动条 */
+            /* [R56-全表放开] 其余所有数据表通杀：模型管理/概览/报表/签到/路由
+               等页面还有一堆别的 class 的表（或没 class 的表），逐个枚举
+               永远漏。凡是「列数 > 3 的表」都按内容展开 —— 手机上列多的
+               表只有横滑一条路，没有例外。列少的布局表不受影响
+               （max-content 不会超过本来就该有的宽度）。 */
+            'table{table-layout:auto !important;width:max-content !important;min-width:100% !important}',
+            'table td,table th{white-space:nowrap !important}',
+
+            /* ③ 装表格的容器成为横向滚动条：
+               已知容器 + 通杀「含有宽表的直接父级」。
+               通杀规则：body 下任何 div，只要它的直接子元素里有变宽的
+               table，就给它开横向滚动。用 JS 找比纯 CSS 通配安全 ——
+               给所有 div 加 overflow-x 会把页面布局打成碎片。 */
             '.card-b{overflow-x:auto !important;-webkit-overflow-scrolling:touch !important}',
             '.doc-tbl{display:block !important;overflow-x:auto !important;-webkit-overflow-scrolling:touch !important}',
 
@@ -598,6 +610,31 @@ private struct RelayWebContainer: UIViewRepresentable {
             s.id = '__minis_hscroll';
             s.textContent = css;
             (document.head || document.documentElement).appendChild(s);
+
+            /* [R56] 通杀容器：找出所有装宽表的直接父级，开横向滚动。
+               DOM 动态渲染（签到中心/模型管理是 JS 刷出来的）也能被
+               MutationObserver 接住。 */
+            function widenParents(){
+              document.querySelectorAll('table').forEach(function(t){
+                if (t.scrollWidth <= t.clientWidth + 2) return;  // 没溢出，不用管
+                var p = t.parentElement;
+                if (!p || p === document.body) return;
+                if (getComputedStyle(p).overflowX !== 'auto') {
+                  p.style.overflowX = 'auto';
+                  p.style.webkitOverflowScrolling = 'touch';
+                }
+              });
+            }
+            widenParents();
+            /* atDocumentStart 注入时 document.body 可能还是 null，
+               等 DOMContentLoaded 再挂 observer（inject 本身也会在那时重跑）。 */
+            if (document.body) {
+              new MutationObserver(widenParents).observe(document.body, {childList:true, subtree:true});
+            } else {
+              document.addEventListener('DOMContentLoaded', function(){
+                new MutationObserver(widenParents).observe(document.body, {childList:true, subtree:true});
+              });
+            }
           }
 
           inject();
