@@ -326,12 +326,25 @@ EOF
 #   · 通用    git curl wget bash coreutils findutils grep sed patch
 #             tar xz gzip zstd file openssl python3
 #
-# 刻意**不装** g++（clang 编 C++ 够用，g++ 还要 36MB）；
-# gcc 本身躲不掉 —— clang18 的依赖里硬写了 gcc，122MB 是强制开销。
+# 刻意**不装** g++（clang 编 C++ 够用，g++ 还要 36MB）。
+#
+# gcc 主包被屏蔽了（见 PRESEED_BLOCK），省 122.8MB。
+# 它是 clang18 的硬依赖，但 clang18 实际只需要 gcc 提供的
+# so:libgcc_s.so.1 —— 那个共享库由独立的 libgcc 包提供（0.1MB）。
+# 也就是说 122.8MB 里 122.7MB 是 gcc 自己的 cc1/collect2 等二进制，
+# 用 clang 的场合一个都用不上。屏蔽后 libgcc 仍会被正常拉进来，
+# 依赖链不断。
 #
 # 体积（实测自 APKINDEX 的 S/I 字段）
 # ---------------------------------------------------------------------------
-#   装完解压后约 638MB，zip 后增加约 164MB。
+#   S = 压缩后（apk 文件本身大小）  I = 安装后（解压到磁盘的大小）
+#
+#   全量 A：86 包  S=220.4MB  I=638.2MB
+#   精简后：78 包  S=167.9MB  I=505.1MB   ← 屏蔽 gcc + 去掉 git
+#
+# 注意这两个数不是 ipa 的增量。zip 里装的是**解压后**的 data/ 目录，
+# 所以真正影响 ipa 体积的是 I 那一列。之前按 S 估算过「增 164MB」，
+# 口径错了，实际 pushed 出来的 zip 是 704MB。
 #
 # 已剔除的死重
 # ---------------------------------------------------------------------------
@@ -357,7 +370,6 @@ PRESEED_PACKAGES=(
     zip
     unzip
     # ── 通用 ──
-    git
     curl
     wget
     bash
@@ -374,6 +386,17 @@ PRESEED_PACKAGES=(
     file
     openssl
     python3
+)
+
+# 依赖闭包里遇到这些名字就跳过，不装。
+#
+# gcc：122.8MB，clang18 硬依赖它只为拿 so:libgcc_s.so.1，而
+#      那个库由独立的 libgcc 包提供。屏蔽后依赖链自动改走 libgcc。
+# git：6.7MB，这三类活（打 ipa / 编 dylib / 打 deb）不需要版本控制。
+#      真要 clone 什么，curl 下 tar 包一样。
+PRESEED_BLOCK=(
+    gcc
+    git
 )
 
 # 装完要删掉的文件/目录。相对 rootfs 的 data 根。
@@ -463,11 +486,15 @@ preseed_toolchain() {
     # 用 Python 写而不是 bash：这是图遍历 + 虚拟包（so:/cmd:）解析，
     # bash 做不了，硬做出来也没人敢改。
     local PLAN="$CACHE_DIR/preseed-plan.txt"
-    python3 - "$MAIN_IDX" "$COMM_IDX" "$PLAN" "${PRESEED_PACKAGES[@]}" <<'PYEOF'
+    python3 - "$MAIN_IDX" "$COMM_IDX" "$PLAN" "${PRESEED_BLOCK[*]}" \
+        "${PRESEED_PACKAGES[@]}" <<'PYEOF'
 import sys
 
 main_idx, comm_idx, out_path = sys.argv[1], sys.argv[2], sys.argv[3]
-roots = sys.argv[4:]
+# [R58-瘦身] 第 4 个参数是空格分隔的屏蔽名单，之后的才是根包。
+# 屏蔽 = 依赖图里遇到就跳过，且跳过之后它的依赖也不再展开。
+BLOCK = set(sys.argv[4].split())
+roots = sys.argv[5:]
 
 def parse(path, repo):
     pkgs, cur = {}, {}
@@ -500,17 +527,26 @@ for name, p in allp.items():
         prov.setdefault(pv.split('=')[0], []).append(name)
 
 def resolve(dep):
-    dep = dep.split('>=')[0].split('=')[0].split('~')[0].strip()
+    dep = dep.split('>=')[0].split('=')[0].split('~')[0].split('<')[0].strip()
     if not dep or dep not in prov:
         return None
+    # [R58-瘦身] 候选里剔掉屏蔽的包。
+    # 例：clang18 硬依赖 gcc，屏蔽 gcc 后这里返回 None，
+    # 该依赖被当成「已满足」不再展开 —— 而 so:libgcc_s.so.1 这条
+    # 虚拟依赖仍能解析到 libgcc 包，所以库不会缺。
+    cands = [c for c in prov[dep] if c not in BLOCK]
+    if not cands:
+        return None
     # 同名真包优先，其次 main 仓，最后按名字长度（短的更可能是主包）
-    for c in prov[dep]:
+    for c in cands:
         if c == dep:
             return c
-    return sorted(prov[dep], key=lambda n: (allp[n]['repo'] != 'main', len(n)))[0]
+    return sorted(cands, key=lambda n: (allp[n]['repo'] != 'main', len(n)))[0]
 
 seen, queue, missing = {}, [], []
 for r in roots:
+    if r in BLOCK:
+        continue
     t = resolve(r)
     if t:
         queue.append(t)
@@ -519,7 +555,7 @@ for r in roots:
 
 while queue:
     n = queue.pop()
-    if n in seen:
+    if n in seen or n in BLOCK:
         continue
     p = allp.get(n)
     if not p:
@@ -530,13 +566,30 @@ while queue:
         if d.startswith('!'):       # !name 是冲突声明，不是依赖
             continue
         t = resolve(d)
-        if t and t not in seen:
+        if t and t not in seen and t not in BLOCK:
             queue.append(t)
         elif not t:
-            missing.append(d)
+            # 被屏蔽导致的「解析不到」不算缺依赖，不打进 missing
+            bare = d.split('>=')[0].split('=')[0].split('~')[0].split('<')[0].strip()
+            if bare not in BLOCK:
+                missing.append(d)
 
+if BLOCK:
+    sys.stderr.write('已屏蔽: %s\n' % ' '.join(sorted(BLOCK)))
 if missing:
     sys.stderr.write('未解析的依赖: %s\n' % sorted(set(missing))[:10])
+
+# [R58-瘦身] 屏蔽 gcc 之后必须确认 libgcc 还在闭包里。
+#
+# 链路是这样：clang18 → gcc → so:libgcc_s.so.1。屏蔽 gcc 后第一环断了，
+# 但 clang18 自己也直接依赖 so:libgcc_s.so.1，所以正常情况 libgcc 会由
+# 那条边带进来。这里再兜一层 —— 万一哪天 Alpine 改了依赖关系，
+# 少了 libgcc 会表现为「clang 能启动但一链接就报错」，非常难查。
+if 'gcc' in BLOCK and 'libgcc' not in seen:
+    p = allp.get('libgcc')
+    if p:
+        seen['libgcc'] = p
+        sys.stderr.write('兜底：显式补入 libgcc（gcc 被屏蔽，但共享库不能缺）\n')
 
 with open(out_path, 'w', encoding='utf-8') as f:
     for n, p in sorted(seen.items()):
@@ -707,8 +760,10 @@ PYEOF
     # 但一定要打印：CI 绿着而工具其实缺了，是最难查的情况。
     local missing_tools=()
     local t
-    for t in clang ld.lld ld64.lld make dpkg dpkg-deb fakeroot \
-             zip unzip git curl python3 tar zstd file \
+    # git / gcc 已屏蔽，不再检查它们。
+    for t in clang clang++ ld.lld ld64.lld make ar as objcopy strip \
+             dpkg dpkg-deb fakeroot zip unzip curl python3 \
+             tar zstd file openssl \
              llvm-objdump llvm-nm llvm-objcopy llvm-strip llvm-lipo; do
         # 软链也要能解析到真实文件才算存在
         if [ ! -e "$ROOTFS_DATA/usr/bin/$t" ] && [ ! -e "$ROOTFS_DATA/usr/local/bin/$t" ]; then
@@ -719,7 +774,16 @@ PYEOF
     if [ ${#missing_tools[@]} -gt 0 ]; then
         log_warning "以下工具没找到：${missing_tools[*]}"
     else
-        log_success "  工具自检通过（20 项全在）"
+        log_success "  工具自检通过（26 项全在）"
+    fi
+
+    # gcc 被屏蔽了，但要确认 libgcc 的共享库还在 —— clang 链接时要用
+    local gccs
+    gccs=$(find "$ROOTFS_DATA/usr/lib" "$ROOTFS_DATA/lib" -name 'libgcc_s.so*' 2>/dev/null | head -1)
+    if [ -n "$gccs" ]; then
+        log_success "  libgcc_s 在位（gcc 主包已屏蔽，仅保留共享库）"
+    else
+        log_warning "  libgcc_s 缺失！clang 能启动但链接会失败"
     fi
 
     # ldid 单独报 —— 它的失败语义与上面不同（只影响 ipa 重签名）
@@ -778,9 +842,11 @@ create_zip_archive() {
     # Remove existing zip
     rm -f "$ZIP_FILE"
 
-    # Create zip (exclude WAL files)
+    # [R58-瘦身] 用 -9 最高压缩级别。默认级别对 .so 这类文件压不动，
+    # 而这里装的是整套编译工具链，值得多花几十秒换几 MB。
+    # 不存符号链接指向的内容（-y），保持 rootfs 结构原样。
     cd "$OUTPUT_DIR"
-    zip -r "alpine-rootfs.zip" "alpine-rootfs" \
+    zip -9 -r -y "alpine-rootfs.zip" "alpine-rootfs" \
         -x "*.db-shm" \
         -x "*.db-wal" \
         > /dev/null
