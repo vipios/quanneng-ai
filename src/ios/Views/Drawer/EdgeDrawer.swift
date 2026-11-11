@@ -477,25 +477,7 @@ private struct EdgePanOverlay: UIViewRepresentable {
         var activeWidth: CGFloat = 0          // >0 表示抽屉开着，整片可接管
         var edgeSlop: CGFloat = DrawerState.edgeSlop
 
-        /// [R45-返回键不灵敏] 顶部导航栏高度（状态栏 + 44pt 导航栏）。
-        ///
-        /// 系统返回键 ‹ 在导航栏左上角，而手势层是 ZStack 最上层、又对
-        /// 左边缘 edgeSlop 内返回 true —— 手指点返回键时触摸先被这一层
-        /// 吃掉，下面的 UIBarButtonItem 收不到点击，于是「要点好几次」。
-        ///
-        /// 解决：把顶部导航栏这一段从手势层的命中区里挖掉。返回键区域
-        /// 的触摸直接穿透（point(inside:) 返回 false），滑动手势则因为
-        /// `UIScreenEdgePanGestureRecognizer` 需要横向位移才 begin，不受
-        /// 影响 —— 从导航栏下方左滑拉抽屉照常工作。
-        private var navBarBottom: CGFloat {
-            safeAreaInsets.top + 44
-        }
-
         override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
-            // 顶部导航栏区域：不拦截，让系统返回键可点。
-            if point.y < navBarBottom {
-                return false
-            }
             if activeWidth > 0 {
                 // 抽屉开着：整片都可接管（用于拖回）
                 return true

@@ -61,9 +61,9 @@ enum SelfUpdateResult: Equatable, Sendable {
         case .notConfigured:
             return "更新源没配好（这是 App 的问题，不是你操作错）"
         case .upToDate(let r, let line, let ms):
-            return "已是最新 v\(r) · \(line) \(ms)ms"
+            return "已是最新（\(r)） · \(line) \(ms)ms"
         case .updateAvailable(let r, let line, let ms):
-            return "有新版 v\(r) · \(line) \(ms)ms"
+            return "有新版 \(r) · \(line) \(ms)ms"
         case .failed(let reason):
             return reason
         }
@@ -189,22 +189,52 @@ enum SelfUpdate {
         let win: Win?
     }
 
-    /// 检查更新。**[R40] 不再有「未配置」这条早退**。
+    /// [R50-按发布时间判断新版本] 检查更新。
+    ///
+    /// 为什么不再用 tag 版本号比：发布走的是滚动标签 `latest`，tag 恒为
+    /// `latest`，`Int("latest")` 解析成 0，永远比不过本地 `[1,0,0]`，
+    /// 于是永远「已是最新」、永远不下载。真信号是 asset 的 `updated_at`
+    /// —— 每次 `gh release upload --clobber` 覆盖上传都会刷新它。
+    ///
+    /// 判断：远端 asset.updated_at 比本地记住的锚点新（或本地没锚点），
+    /// 就是有新版本。锚点在每次下载成功后更新。
     static func check() async -> Outcome {
         guard let win = await race(repo: builtinRepo) else {
             return Outcome(result: .failed(reason: "四条线路都连不上，检查一下网络"),
                            win: nil)
         }
 
-        let remote = win.tag
-        let remoteParts = remote
-            .split(separator: ".")
-            .map { Int($0) ?? 0 }
+        let remote = win.assetUpdatedAt
+        let anchor = lastAssetUpdatedAt
 
-        let r: SelfUpdateResult = compare(remoteParts, currentVersion) > 0
-            ? .updateAvailable(remote: remote, line: win.line.name, ms: win.ms)
-            : .upToDate(remote: remote, line: win.line.name, ms: win.ms)
+        // 没锚点 = 第一次检查，视为有新版本（让用户能更新到当前包）。
+        let hasUpdate: Bool
+        if anchor.isEmpty {
+            hasUpdate = true
+        } else {
+            hasUpdate = remote > anchor
+        }
+
+        let r: SelfUpdateResult = hasUpdate
+            ? .updateAvailable(remote: win.buildLabel, line: win.line.name, ms: win.ms)
+            : .upToDate(remote: win.buildLabel, line: win.line.name, ms: win.ms)
         return Outcome(result: r, win: win)
+    }
+
+    // MARK: 更新锚点
+
+    /// UserDefaults 里记住「上次成功下载的包」的 asset.updated_at。
+    ///
+    /// 用 ISO8601 字符串直接比大小：GitHub 返回的格式固定、且按字典序
+    /// 天然等于时间序（同一位数、同长度、同格式）。不需要解析成 Date。
+    static var lastAssetUpdatedAt: String {
+        get { UserDefaults.standard.string(forKey: "minis.selfupdate.lastAssetUpdatedAt") ?? "" }
+        set { UserDefaults.standard.set(newValue, forKey: "minis.selfupdate.lastAssetUpdatedAt") }
+    }
+
+    /// 下载成功后，把这次包的 asset.updated_at 记成锚点。
+    static func markInstalled(_ win: Win) {
+        lastAssetUpdatedAt = win.assetUpdatedAt
     }
 
     // MARK: 线路竞速
@@ -218,6 +248,11 @@ enum SelfUpdate {
         let ipaName: String?
         let ipaURL: String?
         let ipaSize: Int64
+        /// [R50] asset 的 updated_at（ISO8601 字符串）。每次覆盖上传都会刷新，
+        /// 是「有没有新包」的唯一可靠信号。
+        let assetUpdatedAt: String
+        /// [R50] 给界面显示的一行版本标识，如「build 58」。
+        let buildLabel: String
     }
 
     /// 全部线路同时打，第一个拿到有效 release 的胜出。
@@ -269,11 +304,24 @@ enum SelfUpdate {
                 : tagRaw
             let ms = Int(Date().timeIntervalSince(t0) * 1000)
 
+            // [R50] release 的 title 形如「全能AI 1.0 · build 58」，
+            // 取它的 build 号给界面显示。拿不到就回落 tag。
+            let name = obj["name"] as? String ?? ""
+            let buildLabel: String
+            if let m = name.range(of: "build", options: .caseInsensitive) {
+                let tail = name[m.upperBound...].trimmingCharacters(in: .whitespaces)
+                let num = tail.prefix(while: { $0.isNumber })
+                buildLabel = num.isEmpty ? "v\(tag)" : "build \(num)"
+            } else {
+                buildLabel = "v\(tag)"
+            }
+
             // 找出可安装的包。找 .ipa / .tipa，没有就留 nil ——
             // 「有新版本但没有包」要能如实说出来，不能假装成功。
             var ipaName: String?
             var ipaURL: String?
             var ipaSize: Int64 = 0
+            var assetUpdatedAt = ""
             if let assets = obj["assets"] as? [[String: Any]] {
                 for a in assets {
                     guard let n = a["name"] as? String else { continue }
@@ -282,12 +330,14 @@ enum SelfUpdate {
                     ipaName = n
                     ipaURL = a["browser_download_url"] as? String
                     ipaSize = (a["size"] as? NSNumber)?.int64Value ?? 0
+                    assetUpdatedAt = a["updated_at"] as? String ?? ""
                     break
                 }
             }
 
             return Win(tag: tag, line: line, ms: ms,
-                       ipaName: ipaName, ipaURL: ipaURL, ipaSize: ipaSize)
+                       ipaName: ipaName, ipaURL: ipaURL, ipaSize: ipaSize,
+                       assetUpdatedAt: assetUpdatedAt, buildLabel: buildLabel)
         } catch {
             return nil
         }

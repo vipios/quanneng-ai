@@ -86,8 +86,6 @@ struct SelfUpdateSection: View {
                     // SettingsRowContent 已经占满整行宽度。
                     .padding(.trailing, SettingsDesign.rowPaddingH)
             }
-            .settingsRowRenameable(.version,
-                                   defaultName: AppLocalized("版本"))
 
             divider
 
@@ -109,8 +107,6 @@ struct SelfUpdateSection: View {
             .buttonStyle(.plain)
             .foregroundStyle(.primary)
             .disabled(checking || downloading)
-            .settingsRowRenameable(.checkUpdate,
-                                   defaultName: AppLocalized("检查更新"))
 
             // 结果一句话。只在有话说的时候出现 ——
             // 常驻一行「点上面检查」是多余的，那一行标题已经写清楚了。
@@ -286,6 +282,9 @@ struct SelfUpdateSection: View {
                 }
             }
             savedFile = file
+            // [R50] 下载成功，把这次包的 asset.updated_at 记成锚点，
+            // 下次检查就以此为基准判断有没有更新。
+            SelfUpdate.markInstalled(win)
             // [R44] 下完立刻弹共享面板。用户原话「下载完更新文件后要出来
             // 弹窗，弹窗里面有苹果共享的那个界面」—— 不是「在列表里多一行」。
             shareItem = ShareItem(url: file)

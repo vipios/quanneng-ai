@@ -178,8 +178,6 @@ struct SettingsSheet: View {
                     )
                 }
                 .buttonStyle(.plain)
-                .settingsRowRenameable(.providers,
-                                       defaultName: AppLocalized("Manage Providers"))
 
                 rowDivider()
 
@@ -194,8 +192,6 @@ struct SettingsSheet: View {
                     )
                 }
                 .buttonStyle(.plain)
-                .settingsRowRenameable(.modelGroups,
-                                       defaultName: AppLocalized("Model Groups"))
 
                 rowDivider()
 
@@ -210,8 +206,6 @@ struct SettingsSheet: View {
                     )
                 }
                 .buttonStyle(.plain)
-                .settingsRowRenameable(.tokenUsage,
-                                       defaultName: AppLocalized("Token Usage"))
             }
         }
     }
@@ -236,8 +230,6 @@ struct SettingsSheet: View {
                     )
                 }
                 .buttonStyle(.plain)
-                .settingsRowRenameable(.relayAdmin,
-                                       defaultName: AppLocalized("中转站后台"))
 
                 rowDivider()
 
@@ -253,8 +245,6 @@ struct SettingsSheet: View {
                     )
                 }
                 .buttonStyle(.plain)
-                .settingsRowRenameable(.relayRouter,
-                                       defaultName: AppLocalized("路由器后台"))
             }
         }
     }
@@ -277,8 +267,6 @@ struct SettingsSheet: View {
                     )
                 }
                 .buttonStyle(.plain)
-                .settingsRowRenameable(.appearance,
-                                       defaultName: AppLocalized("Appearance"))
             }
         }
     }
@@ -301,8 +289,6 @@ struct SettingsSheet: View {
                     )
                 }
                 .buttonStyle(.plain)
-                .settingsRowRenameable(.agentTools,
-                                       defaultName: AppLocalized("Agent Tools"))
 
                 rowDivider()
 
@@ -317,13 +303,11 @@ struct SettingsSheet: View {
                     )
                 }
                 .buttonStyle(.plain)
-                .settingsRowRenameable(.subAgents,
-                                       defaultName: AppLocalized("Sub Agents"))
 
                 rowDivider()
 
                 NavigationLink {
-                    SkillsManagementView()
+                    SkillsCatalogView()
                 } label: {
                     SettingsRowContent(
                         title: AnyView(SettingsRowLabel(.skills,
@@ -333,8 +317,6 @@ struct SettingsSheet: View {
                     )
                 }
                 .buttonStyle(.plain)
-                .settingsRowRenameable(.skills,
-                                       defaultName: AppLocalized("Skills"))
 
                 rowDivider()
 
@@ -349,13 +331,10 @@ struct SettingsSheet: View {
                         title: AnyView(SettingsRowLabel(.modes,
                                                         fallback: "说话模式")),
                         symbol: "text.bubble.fill",
-                        iconTint: SettingsDesign.orange,
-                        subtitle: "自动 · 随内容和技能、人格一起判"
+                        iconTint: SettingsDesign.orange
                     )
                 }
                 .buttonStyle(.plain)
-                .settingsRowRenameable(.modes,
-                                       defaultName: AppLocalized("说话模式"))
 
                 rowDivider()
 
@@ -370,8 +349,6 @@ struct SettingsSheet: View {
                     )
                 }
                 .buttonStyle(.plain)
-                .settingsRowRenameable(.soul,
-                                       defaultName: AppLocalized("Soul"))
 
                 rowDivider()
 
@@ -386,8 +363,6 @@ struct SettingsSheet: View {
                     )
                 }
                 .buttonStyle(.plain)
-                .settingsRowRenameable(.memory,
-                                       defaultName: AppLocalized("Memory"))
 
                 rowDivider()
 
@@ -402,8 +377,6 @@ struct SettingsSheet: View {
                     )
                 }
                 .buttonStyle(.plain)
-                .settingsRowRenameable(.mcpIntegrations,
-                                       defaultName: AppLocalized("MCP Integrations"))
 
                 rowDivider()
 
@@ -418,8 +391,6 @@ struct SettingsSheet: View {
                     )
                 }
                 .buttonStyle(.plain)
-                .settingsRowRenameable(.environmentVars,
-                                       defaultName: AppLocalized("Environment Variables"))
             }
         }
     }
@@ -442,8 +413,6 @@ struct SettingsSheet: View {
                     )
                 }
                 .buttonStyle(.plain)
-                .settingsRowRenameable(.storage,
-                                       defaultName: AppLocalized("Storage"))
 
                 rowDivider()
 
@@ -458,8 +427,6 @@ struct SettingsSheet: View {
                     )
                 }
                 .buttonStyle(.plain)
-                .settingsRowRenameable(.sharedFolders,
-                                       defaultName: AppLocalized("Shared Folders"))
 
                 rowDivider()
 
@@ -474,8 +441,6 @@ struct SettingsSheet: View {
                     )
                 }
                 .buttonStyle(.plain)
-                .settingsRowRenameable(.mountedFolders,
-                                       defaultName: AppLocalized("Mount External Folders"))
 
                 if #available(iOS 17.0, *) {
                     rowDivider()
@@ -493,8 +458,6 @@ struct SettingsSheet: View {
                         )
                     }
                     .buttonStyle(.plain)
-                    .settingsRowRenameable(.iCloudSync,
-                                           defaultName: AppLocalized("iCloud Sync"))
                 }
 
                 rowDivider()
@@ -510,8 +473,6 @@ struct SettingsSheet: View {
                     )
                 }
                 .buttonStyle(.plain)
-                .settingsRowRenameable(.backupRestore,
-                                       defaultName: AppLocalized("Backup & Restore"))
 
                 rowDivider()
 
@@ -526,8 +487,6 @@ struct SettingsSheet: View {
                     )
                 }
                 .buttonStyle(.plain)
-                .settingsRowRenameable(.githubAccount,
-                                       defaultName: AppLocalized("GitHub 账号"))
             }
         }
     }
@@ -550,8 +509,6 @@ struct SettingsSheet: View {
                     )
                 }
                 .buttonStyle(.plain)
-                .settingsRowRenameable(.permissions,
-                                       defaultName: AppLocalized("Permissions"))
 
                 if BiometricAuth.isAvailable {
                     rowDivider()
@@ -570,9 +527,6 @@ struct SettingsSheet: View {
                         )
                     }
                     .buttonStyle(.plain)
-                    .settingsRowRenameable(
-                        .faceID,
-                        defaultName: "\(BiometricAuth.biometryDisplayName) \(AppLocalized("Protection"))")
                 }
             }
         }
@@ -597,8 +551,6 @@ struct SettingsSheet: View {
                     )
                 }
                 .buttonStyle(.plain)
-                .settingsRowRenameable(.logs,
-                                       defaultName: AppLocalized("Logs"))
             }
         }
     }
@@ -630,7 +582,7 @@ struct SettingsSheet: View {
         case .usage:
             UsageStatsView()
         case .skills:
-            SkillsManagementView()
+            SkillsCatalogView()
         case .soul:
             SoulSettingsView()
         case .tools:

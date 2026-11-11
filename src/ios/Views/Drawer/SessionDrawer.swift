@@ -90,10 +90,12 @@ struct SessionDrawer: View {
                         normalList
                     }
                 }
-                // [R28-设置齿轮不被压住] 底部留白 = 齿轮 52 + 底边距 16 + 一点余量。
+                // [R28-设置齿轮不被压住] 底部留白 = 齿轮 52 + 底边距 20 + 一点余量。
                 // 齿轮是 overlay 里的绝对定位元素，不参与 VStack 布局，
                 // 少了这段留白最后一个会话会被齿轮盖住点不到。
-                .padding(.bottom, 76)
+                // [R51] 76 → 80：齿轮底边距从 70 改 20 后，
+                // 留白同步对齐（52 + 20 + 余量 8）。
+                .padding(.bottom, 80)
             }
             .scrollDismissesKeyboard(.interactively)
         }
@@ -145,9 +147,11 @@ struct SessionDrawer: View {
         }
         .buttonStyle(.plain)
         .padding(.trailing, 14)
-        // 70 = 底部按钮区 54 + 间隙 16。两个 padding 分开写会被叠加成 70 以下的
-        // 两层缩进，齿轮就飘到按钮中间了，所以合成一个数。
-        .padding(.bottom, 70)
+        // [R51] 底边距从 70 改 20。70 是给「底部按钮区 54 + 间隙 16」留的，
+        // R46 已把两个入口上移到搜索框下方、底部按钮区不存在了，
+        // 齿轮还按 70 缩进就飘在半空。现在只留 20pt 贴住右下角，
+        // Home 指示条区域由系统安全区垫开，不会压条。
+        .padding(.bottom, 20)
         .accessibilityLabel("设置")
     }
 

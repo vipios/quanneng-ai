@@ -24,6 +24,7 @@
 //  ============================================================
 
 import SwiftUI
+import os.log
 
 struct AddRelayProviderView: View {
 
@@ -679,8 +680,81 @@ struct AddRelayProviderView: View {
         RelayProfileStore.shared.upsert(profile)
         ProviderConfigStore.shared.addInstance(instance)
 
+        // [R51-中转站设为默认模型] 保存后把这个中转站的模型设为
+        // 新对话的默认选择。
+        //
+        // 为什么必须做：addInstance 对 apiKey 实例是异步拉模型的
+        // （refreshModels 在后台 Task 里跑），拉到的条目不会自动
+        // 进默认组；defaultPrimaryGroupId 还指着旧组（或 nil）。
+        // 新建对话的模型解析链（createInitialBinding tier1 →
+        // defaultPrimaryGroupId）拿不到这个中转站的模型，顶栏就
+        // 显示「未选择模型」—— 用户必须手动去挑一次。
+        //
+        // 做法：等后台拉模型落地（轮询 store，最多 ~6 秒），然后
+        //
+        //   · 用户在中转站页选了「直连模型」（lanModel）→ 用它
+        //   · 没选 → 用该实例拉到的第一个文本模型
+        //
+        // 建一个单成员组挂到 defaultPrimaryGroupId。已有的默认组
+        // 不覆盖 —— 只在「现在没有默认组」时才设，避免抢用户
+        // 已经手动配好的默认。
+        //
+        // 拉模型失败（中转站不在线等）就放弃，不阻塞保存 ——
+        // 用户下次手动刷新模型后再说，行为与从前一致。
+        await seedDefaultModelGroup(for: instance, preferredModelId: lanModel)
+
         onSaved?(instance.id)
         dismiss()
+    }
+
+    /// [R51] 保存中转站后，把它的模型挂成新对话的默认选择。
+    ///
+    /// 只在「当前没有默认组」时生效；已有默认组说明用户配过，不抢。
+    /// 等待 addInstance 的后台 refreshModels 落地最多 ~6 秒
+    /// （0.3s × 20 次），超时就用现有条目（可能为空 = 放弃）。
+    private func seedDefaultModelGroup(for instance: ProviderInstance,
+                                       preferredModelId: String?) async {
+        let store = ProviderConfigStore.shared
+
+        // 已有默认组：用户配置过，不覆盖。
+        if store.defaultPrimaryGroupId != nil { return }
+
+        // 等后台模型拉取落地（addInstance 里 fire-and-forget 的 Task）。
+        var entries: [ModelEntry] = []
+        for _ in 0..<20 {
+            entries = store.modelEntries.filter {
+                $0.providerInstanceId == instance.id && !$0.isHidden
+            }
+            if !entries.isEmpty { break }
+            try? await Task.sleep(nanoseconds: 300_000_000)
+        }
+
+        // 用户在中转站页选的「直连模型」优先；没选就用第一个文本模型。
+        let chosen: ModelEntry?
+        if let preferred = preferredModelId {
+            chosen = entries.first { $0.model.id == preferred }
+        } else {
+            chosen = entries.first { entry in
+                guard let m = entry.model.modalityOverride else { return true }
+                return !m.contains(.imageOutput) && !m.contains(.audioOutput)
+                    && !m.contains(.videoOutput)
+            } ?? entries.first
+        }
+        guard let entry = chosen else {
+            Logger(subsystem: "app.minis", category: "RelaySetup").info(
+                "[RelayDefault] instance=\(instance.label) 拉不到模型条目，跳过默认组设置")
+            return
+        }
+
+        let group = ModelGroup(
+            name: instance.label,
+            memberEntryIds: [entry.id],
+            strategy: .fallback
+        )
+        store.addGroup(group)
+        store.defaultPrimaryGroupId = group.id
+        Logger(subsystem: "app.minis", category: "RelaySetup").info(
+            "[RelayDefault] instance=\(instance.label) 已设为默认组 entry=\(entry.model.id)")
     }
 }
 
