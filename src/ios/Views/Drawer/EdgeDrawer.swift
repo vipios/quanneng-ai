@@ -500,39 +500,34 @@ private struct EdgePanOverlay: UIViewRepresentable {
         var activeWidth: CGFloat = 0          // >0 表示抽屉开着，整片可接管
         var edgeSlop: CGFloat = DrawerState.edgeSlop
 
-        /// [R53-返回键彻底放行] 顶部导航栏底界。手势层（全屏铺在最上层）
-        /// 会吃掉落在它命中区里的触摸 —— 系统返回键 ‹ 在左上角，正好在
-        /// 左边缘 edgeSlop 带内，所以必须把「整段导航栏」从手势层命中区
-        /// 挖掉，让返回键的触摸穿透到下面的 NavigationStack。
+        /// [R56-返回键·动态穿透] 顶部导航栏底界。
         ///
-        /// 取安全区的方式按可靠度降序，最后兜底一个足够大的常数：
-        ///   keyWindow → 自身 window → 固定 103（刘海机导航栏底）。
-        /// 之前多版「挖洞不够」的根因都是取到 0 或偏小，返回键热区
-        /// （44×44，中心在导航栏，实际从 y≈statusBar 延伸到 statusBar+44）
-        /// 的下半段仍落在手势层里。
-        /// [R55-返回键·必中挖洞] 导航栏底界。
-        ///
-        /// 之前多版「挖洞不够」的复盘：keyWindow 在某些时序下返回的
-        /// safeAreaInsets.top 是 0（window 场景切换/尚未 layout），
-        /// 挖出来的高度只剩 56，而返回键在 y≈95 —— 只有 y<56 能点，
-        /// 完美对应「要点图标上方才有反应」。
-        ///
-        /// 这次不再猜：直接用固定值。iPhone 全系导航栏底最深 103
-        /// （刘海/灵动岛机型 = 59 状态栏 + 44 导航栏），返回键 44×44
-        /// 热区往下多算 17pt 余量 = 120。iPad 状态栏 24 + 44 = 68，
-        /// 同样被 120 覆盖。多放行的这一条窄带（y 103~120）里没有
-        /// 可点内容，误伤成本为零。
+        /// 动态取状态栏高度 + 导航栏 44，**不写死固定值**：
+        ///   · 刘海/灵动岛 = 59，老机型 = 20，iPad = 24，各自不同
+        ///   · hitTest 发生在触摸分发时，此刻视图必已挂进 window，
+        ///     `window?.safeAreaInsets.top` 一定是真值（之前用 keyWindow
+        ///     找错 window 才是「取到 0」的根因）
         var navBarBottom: CGFloat {
-            return 120
+            return (window?.safeAreaInsets.top ?? 0) + 44
+        }
+
+        /// [R56] 导航栏区域直接穿透（返回 nil），把触摸完整交给系统
+        /// 返回键 / 系统返回手势。
+        ///
+        /// 之前只在 `point(inside:)` 里「挖洞」：point(inside:) 返回 false
+        /// 后 UIKit 仍可能继续命中这个视图的其它部分，边缘手势照样在
+        /// window 层被触发，所以返回键始终点不干净。
+        /// hitTest 返回 nil 是更彻底的一层：视图直接退出命中链，落在
+        /// 导航栏里的 tap 落到系统返回键、侧滑落到系统返回手势，抽屉
+        /// 手势完全不参与。
+        override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
+            if point.y < navBarBottom {
+                return nil
+            }
+            return super.hitTest(point, with: event)
         }
 
         override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
-            // 顶部导航栏区域：不拦截，让系统返回键可点。
-            // 这条必须放在 activeWidth 判断之前 —— 抽屉开着时导航栏
-            // 也不归手势层管（抽屉有自己的关闭按钮和遮罩）。
-            if point.y < navBarBottom {
-                return false
-            }
             if activeWidth > 0 {
                 // 抽屉开着：整片都可接管（用于拖回）
                 return true
