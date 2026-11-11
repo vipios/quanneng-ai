@@ -338,8 +338,12 @@ jobs:
             exit 1
           fi
 
-          # 工程里所有 dei/resources 下的硬引用，逐个确认在不在
-          for f in deps/resources/alpine-rootfs.zip deps/resources/RootfsPatch.bundle; do
+          # [R53] 只校验 RootfsPatch.bundle。alpine-rootfs.zip 由后面的
+          # 「Prepare Alpine rootfs」步骤负责生成/命中缓存 —— 那个步骤
+          # 在缓存 miss 时会跑 prepare_alpine_rootfs.sh 现打 zip。
+          # 这里提前检查 zip 会在缓存 miss（比如 bump 过缓存 key）时
+          # 误判「缺文件」直接 exit 1，导致编译没开始就失败。
+          for f in deps/resources/RootfsPatch.bundle; do
             if [ -e "$f" ]; then
               echo "OK   $f"
             else
