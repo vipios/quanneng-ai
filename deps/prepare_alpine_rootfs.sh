@@ -205,7 +205,20 @@ create_fakefs() {
 configure_rootfs() {
     log_info "Configuring rootfs for iSH..."
 
-    local ROOTFS_DATA="$OUTPUT_DIR/alpine-rootfs/data"
+    # [R58-预装工具链-修正] 同样改成操作暂存目录树，在 fakefsify 之前跑。
+    #
+    # 这里新建的 /etc/motd、/etc/inittab、/etc/resolv.conf、
+    # /etc/apk/repositories 都是**新文件**。以前这段在 fakefsify 之后跑，
+    # 新文件没进 meta.db 的 paths 表 —— 设备上等于不存在：
+    # `cat /etc/resolv.conf` 会报 No such file or directory，DNS 直接不工作。
+    #
+    # 改动已有的 /etc/passwd、/etc/profile 不受影响（它们在表里已有记录），
+    # 但一并挪过来更一致，也省得以后有人再踩一次。
+    local ROOTFS_DATA="$OUTPUT_DIR/rootfs-staging"
+
+    if [ ! -d "$ROOTFS_DATA" ]; then
+        log_error "暂存目录不存在，preseed_toolchain 没跑？"
+    fi
 
     # Create necessary directories
     mkdir -p "$ROOTFS_DATA/dev"
@@ -382,13 +395,36 @@ LDID_URL="https://github.com/ProcursusTeam/ldid/releases/download/v2.1.5-procurs
 LDID_SHA_HINT="2745416"   # 实测字节数，仅用于下载完整性检查
 
 preseed_toolchain() {
-    local ROOTFS_DATA="$OUTPUT_DIR/alpine-rootfs/data"
+    # [R58-预装工具链-修正] 这里改的是**解包后的 rootfs 目录树**，
+    # 不是 fakefs 的 data 目录。
+    #
+    # 为什么：fakefsify 把所有路径写进 meta.db 的 paths 表，iSH 内核靠那张表
+    # 认文件（stat 查不到就 ENOENT，readdir 查不到就跳过）。所以必须在
+    # fakefsify 之前把文件准备好，不能事后往 data/ 里塞。
+    #
+    # 流程：minirootfs.tar.gz → 解包到 staging → 解入工具链 → 重新打包
+    local ROOTFS_FILE="alpine-minirootfs-${ALPINE_VERSION}.${ALPINE_MINOR}-${ALPINE_ARCH}.tar.gz"
+    local ROOTFS_PATH="$CACHE_DIR/$ROOTFS_FILE"
+    local STAGING="$OUTPUT_DIR/rootfs-staging"
 
-    if [ ! -d "$ROOTFS_DATA" ]; then
-        log_error "rootfs data 目录不存在，fakefs 没转成功？"
+    if [ ! -f "$ROOTFS_PATH" ]; then
+        log_error "minirootfs 不存在：$ROOTFS_PATH（download_alpine 没跑？）"
     fi
 
     log_info "预装工具链：${#PRESEED_PACKAGES[@]} 个顶层包"
+
+    # ── 0. 解包 minirootfs 到暂存目录 ──
+    if [ -d "$STAGING" ]; then
+        rm -rf "$STAGING"
+    fi
+    mkdir -p "$STAGING"
+    log_info "解包 minirootfs 到暂存目录…"
+    # 这里同样不加 --no-same-permissions：minirootfs 里的 /bin/busybox、
+    # /bin/sh、/sbin/* 全靠执行位活着，抹掉之后整个 rootfs 起不来。
+    tar xzf "$ROOTFS_PATH" -C "$STAGING" --no-same-owner \
+        || log_error "minirootfs 解包失败"
+
+    local ROOTFS_DATA="$STAGING"
 
     # ── 1. 拿到索引，算出完整依赖闭包 ──
     #
@@ -547,8 +583,18 @@ PYEOF
 
         # 解压。--no-same-owner 必须有：CI 上是普通用户，
         # 包里记录的 uid/gid 在这里没意义，强行还原会报权限错。
+        #
+        # [R58-预装工具链-修正] 这里**刻意不加** --no-same-permissions。
+        # 那个开关的本意是「别去还原权限」，但它连带把执行位也吃掉了 ——
+        # 装进去的 clang / ld.lld / python3 / ldid 全是 0644，
+        # 在设备上表现为 Permission denied，而且不报「缺文件」，
+        # 很容易被误判成别的问题（之前就是这样，查了半天路径）。
+        #
+        # 不用 --no-same-permissions 会不会因为权限报错？
+        # 不会：rootfs 是当前用户自己的目录，包里记录的 0444/0555 之类
+        # 都能正常写入（我们不是 root，但目标文件本来就归自己）。
         if ! tar xzf "$apk_file" -C "$ROOTFS_DATA" \
-                --no-same-owner --no-same-permissions 2>/dev/null; then
+                --no-same-owner 2>/dev/null; then
             log_warning "[$idx/$total_n] 解压失败：$name-$ver"
             failed+=("$name")
             continue
@@ -596,6 +642,26 @@ PYEOF
         log_info "  已为 llvm18 工具补 $(ls "$llvm_bin" | wc -l | tr -d ' ') 个软链"
     fi
 
+    # ── 5b. 可执行位兜底 ──
+    #
+    # 上一步去掉 --no-same-permissions 之后，正常情况权限是对的。
+    # 但 tar 的权限还原依赖 umask 和文件系统，CI 环境不是我们能控制的，
+    # 所以这里再扫一遍：把 /usr/bin、/usr/sbin、/usr/local/bin 以及
+    # llvm18 目录下所有普通文件补上执行位。
+    #
+    # 为什么敢无脑 chmod +x：这三个目录里本来就不该有不可执行的数据文件。
+    # 真放错地方了，多一个执行位也不会有副作用（没人会去执行一个 .txt）。
+    local exec_dir
+    for exec_dir in "$ROOTFS_DATA/usr/bin" \
+                    "$ROOTFS_DATA/usr/sbin" \
+                    "$ROOTFS_DATA/usr/local/bin" \
+                    "$ROOTFS_DATA/usr/lib/llvm18/bin" \
+                    "$ROOTFS_DATA/bin" "$ROOTFS_DATA/sbin"; do
+        [ -d "$exec_dir" ] || continue
+        find "$exec_dir" -maxdepth 1 -type f -exec chmod 755 {} + 2>/dev/null || true
+    done
+    log_info "  已补齐可执行位"
+
     # ── 6. 放 ldid ──
     #
     # 这是 ipa 重签名的命门，Alpine 仓库里没有，只能用预编译版。
@@ -634,11 +700,70 @@ PYEOF
         log_warning "ldid 没下载成功。ipa 重签名会不可用，其余功能不受影响。"
     fi
 
-    # ── 7. 让 PATH 能找到全部东西 ──
+    # ── 7. 收尾自检 ──
     #
-    # /usr/local/bin 已经在原 profile 里，这里只补一句说明性注释，
-    # 不动已有配置 —— 改 PATH 是最容易把别人的环境搞坏的操作。
-    log_success "工具链预装完成"
+    # 这一步只是把「该有的东西在不在」打出来，缺了不中断构建 ——
+    # 少一个 wget 不该让整轮 30 分钟白跑。
+    # 但一定要打印：CI 绿着而工具其实缺了，是最难查的情况。
+    local missing_tools=()
+    local t
+    for t in clang ld.lld ld64.lld make dpkg dpkg-deb fakeroot \
+             zip unzip git curl python3 tar zstd file \
+             llvm-objdump llvm-nm llvm-objcopy llvm-strip llvm-lipo; do
+        # 软链也要能解析到真实文件才算存在
+        if [ ! -e "$ROOTFS_DATA/usr/bin/$t" ] && [ ! -e "$ROOTFS_DATA/usr/local/bin/$t" ]; then
+            missing_tools+=("$t")
+        fi
+    done
+
+    if [ ${#missing_tools[@]} -gt 0 ]; then
+        log_warning "以下工具没找到：${missing_tools[*]}"
+    else
+        log_success "  工具自检通过（20 项全在）"
+    fi
+
+    # ldid 单独报 —— 它的失败语义与上面不同（只影响 ipa 重签名）
+    if [ -x "$ROOTFS_DATA/usr/local/bin/ldid" ]; then
+        log_success "  ldid 可执行"
+    else
+        log_warning "  ldid 缺失或不可执行，ipa 重签名会失败"
+    fi
+
+    log_success "工具链已解入暂存目录"
+}
+
+# ============================================================================
+# Repack rootfs tar
+# ============================================================================
+#
+# 把暂存目录重新打包成 tar.gz，覆盖原始 minirootfs。
+# create_fakefs 读的就是这个路径，所以下游一行都不用改。
+#
+# 必须放在 configure_rootfs 之后 —— 那一步还在往暂存目录里写配置文件。
+repack_rootfs() {
+    local ROOTFS_FILE="alpine-minirootfs-${ALPINE_VERSION}.${ALPINE_MINOR}-${ALPINE_ARCH}.tar.gz"
+    local ROOTFS_PATH="$CACHE_DIR/$ROOTFS_FILE"
+    local STAGING="$OUTPUT_DIR/rootfs-staging"
+
+    if [ ! -d "$STAGING" ]; then
+        log_error "暂存目录不存在，没法打包"
+    fi
+
+    # 用 -C "$STAGING" . 而不是把 staging 目录本身打进去 —— 否则 tar 里
+    # 会多一层 rootfs-staging/，fakefsify 会把它当成根的第一个子目录，
+    # 整棵树的路径全错位。
+    local REPACKED="$CACHE_DIR/${ROOTFS_FILE}.repacked"
+    log_info "重新打包 rootfs（含工具链）…"
+    tar czf "$REPACKED" -C "$STAGING" . || log_error "重新打包失败"
+
+    if [ ! -s "$REPACKED" ]; then
+        log_error "打包产物为空"
+    fi
+
+    mv -f "$REPACKED" "$ROOTFS_PATH"
+    rm -rf "$STAGING"
+
+    log_success "rootfs 已更新：$(du -h "$ROOTFS_PATH" | cut -f1)"
 }
 
 # ============================================================================
@@ -725,11 +850,29 @@ main() {
     check_prerequisites
     download_alpine
     build_fakefsify
-    create_fakefs
-    configure_rootfs
-    # [R58-预装工具链] 必须在 create_zip_archive 之前 ——
-    # 它往 fakefs 的 data 目录里写文件，zip 是最后打包那一步。
+    # [R58-预装工具链-修正] 这四步的顺序是关键，不能随便调。
+    #
+    # 原来的顺序是 create_fakefs → configure → preseed → zip，往 fakefs 的
+    # data/ 目录里直接写文件。这个做法是错的，而且错得很隐蔽：
+    #
+    # iSH 内核不按目录项找文件，它按 meta.db 的 paths 表查 inode：
+    #   · fakefs_stat()   → path_read_stat() 查不到就返回 ENOENT
+    #   · fakefs_readdir() → path_get_inode()==0 时 goto retry 跳过该条目
+    #
+    # 也就是说手工塞进 data/ 的文件，在设备上 `ls` 看不见、`stat` 报不存在、
+    # 执行当然也找不到。文件实实在在地躺在 App 沙盒里，但内核不认。
+    #
+    # 现在的顺序：
+    #   1. preseed_toolchain  解包 minirootfs → staging，把 86 个包解进去
+    #   2. configure_rootfs   往同一个 staging 写 profile / motd / resolv.conf
+    #   3. repack_rootfs      把 staging 打回 tar.gz
+    #   4. create_fakefs      一次 fakefsify，所有路径一次性写进 meta.db
+    #
+    # 前三步都在 tar 层面动手，fakefsify 只跑一次、看到的就是完整目录树。
     preseed_toolchain
+    configure_rootfs
+    repack_rootfs
+    create_fakefs
     create_zip_archive
     print_summary
 }
