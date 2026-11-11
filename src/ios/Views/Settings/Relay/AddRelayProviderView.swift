@@ -33,11 +33,22 @@ struct AddRelayProviderView: View {
     /// 外部传入：保存成功后回调，用于让列表刷新
     var onSaved: ((String) -> Void)?
 
+    /// [R52-编辑模式] 非 nil = 编辑已存在的中转站（回填 + 更新），
+    /// nil = 新增。编辑时 instanceId 保持不变。
+    private let editInstanceId: String?
+
+    init(editInstanceId: String? = nil, onSaved: ((String) -> Void)? = nil) {
+        self.editInstanceId = editInstanceId
+        self.onSaved = onSaved
+    }
+
     @State private var label = ""
     @State private var protocolKind: RelayProtocolKind = .openAI
     @State private var homeURL = ""
     @State private var awayURL = ""
     @State private var apiKey = ""
+    /// [R52-第三方键盘] API Key 明文显示开关。默认明文，第三方键盘可用。
+    @State private var showApiKey = true
     @State private var routeMode: RelayRouteMode = .auto
     @State private var appendV1 = true
 
@@ -93,7 +104,7 @@ struct AddRelayProviderView: View {
                 }
             }
         }
-        .navigationTitle("添加 AI 中转站")
+        .navigationTitle(editInstanceId == nil ? "添加 AI 中转站" : "编辑 AI 中转站")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .cancellationAction) {
@@ -116,23 +127,49 @@ struct AddRelayProviderView: View {
             modelPickerSheet(line)
         }
         .onAppear {
-            // [R42] 不再预填地址。
-            //
-            // 原来这里会填真实的内网 IP 和域名 —— 那是作者自己家的网络
-            // 结构，随 App 一起发出去，等于把家里的网络公开了。
-            // 用户明确要求这两个地址自己填，所以留空。
-            //
-            // 顺带一个实际问题：预填了真实地址之后，用户不想要也会
-            // 直接保存，然后每次请求都先去敲一个不属于他的 IP，白等超时。
-            label = ""
+            if let eid = editInstanceId {
+                loadForEdit(instanceId: eid)
+            } else {
+                // [R42] 不再预填地址。
+                //
+                // 原来这里会填真实的内网 IP 和域名 —— 那是作者自己家的网络
+                // 结构，随 App 一起发出去，等于把家里的网络公开了。
+                // 用户明确要求这两个地址自己填，所以留空。
+                //
+                // 顺带一个实际问题：预填了真实地址之后，用户不想要也会
+                // 直接保存，然后每次请求都先去敲一个不属于他的 IP，白等超时。
+                label = ""
+            }
         }
     }
 
+    /// [R52-编辑模式] 用已有档案回填表单。
+    private func loadForEdit(instanceId: String) {
+        guard let p = RelayProfileStore.shared.profile(for: instanceId) else {
+            saveError = "找不到这条中转站的档案。"
+            return
+        }
+        let inst = ProviderConfigStore.shared.instance(for: instanceId)
+        label = inst?.label ?? ""
+        homeURL = p.homeURL
+        awayURL = p.awayURL
+        protocolKind = p.protocolKind
+        routeMode = p.routeMode
+        appendV1 = p.effectiveAppendV1
+        lanModel = p.lanModel
+        wanModel = p.wanModel
+        // API Key 不回填明文（钥匙串里只存了密文，取回不回填原文），
+        // 留空 = 不修改；用户要改就重填。
+        apiKey = ""
+    }
+
     private var canSave: Bool {
-        !label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let base = !label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && !homeURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && !awayURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        // 编辑模式：API Key 留空 = 不修改，所以不强制填。
+        if editInstanceId != nil { return base }
+        return base && !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     // MARK: - 基础
@@ -213,9 +250,32 @@ struct AddRelayProviderView: View {
 
     private var keySection: some View {
         Section {
-            SecureField("sk-...", text: $apiKey)
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
+            // [R52-第三方键盘] 不再用 SecureField：iOS 规定密码框
+            // （isSecureTextEntry）只能弹原生键盘，第三方键盘（搜狗/百度等）
+            // 一律被系统换掉，用户没法用自己的输入法填 Key。
+            //
+            // 改成普通 TextField + 眼睛按钮手动切换明文/密文：
+            //   · 明文态（默认）：第三方键盘随便用，Key 看得见，自己注意场合
+            //   · 密文态：点眼睛切过来，系统会换成原生键盘 —— 这是切密文的
+            //     固有代价，不是 bug；再点一次切回明文即恢复
+            //   · .oneTimeCode 不能加：它同样会触发系统密码键盘
+            HStack(spacing: 8) {
+                if showApiKey {
+                    TextField("sk-...", text: $apiKey)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                } else {
+                    SecureField("sk-...", text: $apiKey)
+                }
+                Button {
+                    showApiKey.toggle()
+                } label: {
+                    Image(systemName: showApiKey ? "eye.slash" : "eye")
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(showApiKey ? "隐藏 API Key" : "显示 API Key")
+            }
         } header: {
             Text("API Key")
         }
@@ -384,27 +444,38 @@ struct AddRelayProviderView: View {
         return modelList.filter { $0.lowercased().contains(kw) }
     }
 
-    /// 向该线路实拉 /v1/models，得到模型 id 列表。
+    /// [R52-两条线路都试] 向中转站拉 /v1/models，得到模型 id 列表。
     ///
-    /// 判据与 `probe` 一致：用中转站自己的地址 + API Key。地址按线路选
-    /// （lan 用内网、wan 用外网），协议处理复用了 OpenAI 的 /v1 规则。
+    /// 用户原话：「不管内网还是外网都能点击获取到模型」。原实现按线路
+    /// 拆死 —— 点「直连模型」只探内网地址、点「在外模型」只探外网地址，
+    /// 人在外网点直连必然超时失败，失败页的「重新获取」还是同一条死路。
+    ///
+    /// 现在不再区分线路：把两条地址都试一遍，哪条通就用哪条的列表。
+    /// 点「直连模型」还是「在外模型」只决定弹窗标题，拉取逻辑完全一样
+    /// （同一家中转站，两个地址拉到的本来就是同一份模型表）。
     private func fetchModels(_ line: RelayLine) async {
         fetchingModels = true
         defer { fetchingModels = false }
 
         let key = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        let rawBase = line == .lan ? homeURL : awayURL
-        var base = rawBase.trimmingCharacters(in: .whitespacesAndNewlines)
-        while base.hasSuffix("/") { base.removeLast() }
-        guard !base.isEmpty else {
+
+        // 两条候选地址（去尾斜杠 + 去空）。顺序无关紧要，并发竞速。
+        let bases = [homeURL, awayURL]
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .map { base -> String in
+                var b = base
+                while b.hasSuffix("/") { b.removeLast() }
+                return b
+            }
+        guard !bases.isEmpty else {
             modelList = []
-            modelFetchError = "请先填好该线路的地址。"
+            modelFetchError = "请先填好至少一个地址。"
             pickingLine = line
             return
         }
 
-        // 拼 /v1/models（OpenAI 兼容）。Anthropic 兼容没有 /models，这里
-        // 也按 OpenAI 的路径拼 —— 若协议是 anthropic，提示暂不支持拉列表。
+        // Anthropic 兼容没有 /models，提示暂不支持。
         if protocolKind == .anthropic {
             modelList = []
             modelFetchError = "Anthropic 兼容协议暂不支持拉取模型列表，请改用 OpenAI 兼容。"
@@ -412,30 +483,40 @@ struct AddRelayProviderView: View {
             return
         }
 
-        var candidate: [String] = []
-        if appendV1 {
-            let withV1 = base.hasSuffix("/v1") ? base : base + "/v1"
-            candidate.append(withV1 + "/models")
-            if !base.hasSuffix("/v1") { candidate.append(base + "/models") }
-        } else {
-            candidate.append(base + "/models")
-            if !base.hasSuffix("/v1") { candidate.append(base + "/v1/models") }
-        }
-
-        var list: [String] = []
-        var err = ""
-        for path in candidate {
-            if let got = await fetchModelListOne(path, key: key) {
-                list = got
-                err = ""
-                break
+        // 每个地址按 /v1 规则展开两条路径，全部并发打，先到先用。
+        var paths: [String] = []
+        for base in bases {
+            if appendV1 {
+                let withV1 = base.hasSuffix("/v1") ? base : base + "/v1"
+                paths.append(withV1 + "/models")
+                if !base.hasSuffix("/v1") { paths.append(base + "/models") }
+            } else {
+                paths.append(base + "/models")
+                if !base.hasSuffix("/v1") { paths.append(base + "/v1/models") }
             }
         }
-        if list.isEmpty && err.isEmpty {
-            err = "该线路没拉到可用模型。检查地址、端口，或 API Key。"
+
+        // 并发竞速：谁先返回非空列表就用谁的。
+        // 「重新获取」每次都是全新一轮请求，不缓存失败结果 ——
+        // 原来失败后再点按钮其实也会重拉，但只重试当前这一条线路，
+        // 人在外网点直连怎么重试都是死路；现在两条一起打，任何一条
+        // 活着就能出列表。
+        let result: [String] = await withTaskGroup(of: [String]?.self) { group in
+            for p in paths {
+                group.addTask { await self.fetchModelListOne(p, key: key) }
+            }
+            for await got in group {
+                if let got, !got.isEmpty {
+                    group.cancelAll()
+                    return got
+                }
+            }
+            return []
         }
 
-        modelList = list.sorted()
+        let err = result.isEmpty ? "两条线路都没拉到模型。检查地址、端口，或 API Key。" : ""
+
+        modelList = result.sorted()
         modelFetchError = err
         pickingLine = line
     }
@@ -630,15 +711,27 @@ struct AddRelayProviderView: View {
         let away = awayURL.trimmingCharacters(in: .whitespacesAndNewlines)
         let key = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
 
+        // [R52-编辑模式] 编辑时复用原 instanceId，新增才生成新的。
+        let instanceId = editInstanceId ?? UUID().uuidString
+
+        // 编辑时保留原实例的 isEnabled / createdAt / customUserAgent，
+        // 不要因为「重建实例」把用户停用状态或创建时间弄丢。
+        let old = editInstanceId.flatMap { ProviderConfigStore.shared.instance(for: $0) }
+
         // 建实例：customBaseURL 用内网地址（离线兜底），
         // 真正生效的地址由中转站档案 + requestBaseURL 决定
         let providerType: ProviderType = protocolKind == .openAI ? .openAI : .anthropic
         let instance = ProviderInstance(
+            id: instanceId,
             label: name,
             providerType: providerType,
             credentialType: .apiKey,
+            isEnabled: old?.isEnabled ?? true,
+            createdAt: old?.createdAt ?? Date(),
             customBaseURL: home,
-            appendV1Suffix: protocolKind == .openAI ? appendV1 : true
+            appendV1Suffix: protocolKind == .openAI ? appendV1 : true,
+            customUserAgent: old?.customUserAgent,
+            unknownProviderTypeRaw: old?.unknownProviderTypeRaw
         )
 
         // 先判定一次，把结果缓存进档案（失败也不阻塞保存）。
@@ -654,31 +747,38 @@ struct AddRelayProviderView: View {
         let isLan = await probe(home, key: key) != nil
 
         let profile = RelayProviderProfile(
-            instanceId: instance.id,
+            instanceId: instanceId,
             homeURL: home,
             awayURL: away,
             routeMode: routeMode,
             protocolKind: protocolKind,
             lastResolvedIsLan: isLan,
             lastResolvedAt: Date(),
-            // 档案里也要存一份 —— 将来加「编辑中转站」时靠它回填，
-            // 否则每次打开编辑页都显示默认值，用户改都不改就被覆盖掉。
+            // 档案里也要存一份 —— 编辑页打开时靠它回填。
             appendV1Suffix: instance.appendV1Suffix,
             // [R45-直连/在外模型] 两条线路各自选的模型。
             lanModel: lanModel,
             wanModel: wanModel
         )
 
-        // 顺序：先写 Key（失败就整单不落），再写档案，最后加实例。
+        // 顺序：先写 Key（失败就整单不落），再写档案，最后加/改实例。
         // 这样任何一步失败都不会留下「有实例没 Key」的坏状态。
-        ProviderKeychainHelper.saveAPIKey(key, instanceId: instance.id)
-        guard ProviderKeychainHelper.loadAPIKey(instanceId: instance.id) != nil else {
-            saveError = "保存失败：API Key 无法写入钥匙串。"
-            return
+        //
+        // [R52] 编辑模式：key 留空 = 不修改原 Key，跳过写钥匙串。
+        if !key.isEmpty {
+            ProviderKeychainHelper.saveAPIKey(key, instanceId: instanceId)
+            guard ProviderKeychainHelper.loadAPIKey(instanceId: instanceId) != nil else {
+                saveError = "保存失败：API Key 无法写入钥匙串。"
+                return
+            }
         }
 
         RelayProfileStore.shared.upsert(profile)
-        ProviderConfigStore.shared.addInstance(instance)
+        if editInstanceId != nil {
+            ProviderConfigStore.shared.updateInstance(instance)
+        } else {
+            ProviderConfigStore.shared.addInstance(instance)
+        }
 
         // [R51-中转站设为默认模型] 保存后把这个中转站的模型设为
         // 新对话的默认选择。

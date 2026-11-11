@@ -477,7 +477,30 @@ private struct EdgePanOverlay: UIViewRepresentable {
         var activeWidth: CGFloat = 0          // >0 表示抽屉开着，整片可接管
         var edgeSlop: CGFloat = DrawerState.edgeSlop
 
+        /// [R52-返回键点不了·真根因] 顶部导航栏高度。
+        ///
+        /// 为什么不能用 `safeAreaInsets.top`：这个桥接 UIView 挂在
+        /// SwiftUI 的 ZStack 上，UIKit 侧它不是布局顶层，自己的
+        /// `safeAreaInsets` 经常是 0 —— R45 那版挖洞算出来 0+44=44，
+        /// 只挖掉了状态栏；返回键 ‹ 实际在 y≈54~98 的导航栏区域，
+        /// 没挖到，等于白挖。build 58 装机「返回键还是点不了」。
+        ///
+        /// 改用 window 的 safeAreaInsets（hitTest 时视图已挂进 window
+        /// 层级，window 的值是真机值：刘海屏 59、老机型 20）。
+        /// 兜底 59 覆盖最常见机型；拿不到 window 时 59+44=103 也
+        /// 足够盖住导航栏（刘海机导航栏底 ≈103）。
+        private var navBarBottom: CGFloat {
+            let top = window?.safeAreaInsets.top ?? 59
+            return top + 44
+        }
+
         override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
+            // 顶部导航栏区域：不拦截，让系统返回键可点。
+            // 这条必须放在 activeWidth 判断之前 —— 抽屉开着时导航栏
+            // 也不归手势层管（抽屉有自己的关闭按钮和遮罩）。
+            if point.y < navBarBottom {
+                return false
+            }
             if activeWidth > 0 {
                 // 抽屉开着：整片都可接管（用于拖回）
                 return true

@@ -141,7 +141,8 @@ struct AddProviderView: View {
     @State private var selectedType: ProviderType?
     @State private var selectedCredential: ProviderCredential?
     @State private var apiKeyInput = ""
-    @State private var showApiKeyPlaintext = false
+    @State private var showApiKeyPlaintext = true   // [R52-第三方键盘] 默认明文，SecureField 会强制原生键盘
+
     @State private var labelInput = ""
     /// True once the user has manually edited the label. We use this to
     /// stop `defaultLabel(for:)` from clobbering a label the user just
