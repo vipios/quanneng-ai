@@ -48,9 +48,18 @@ enum GitHubCloudBuildTool {
         guard GitHubAuth.shared.hasToken else {
             return ("Error: 还没登录 GitHub。让用户到「设置 → 存储 → GitHub 账号」登录后再试。不要重试本工具。", false)
         }
-        guard GitHubPush.shared.isReady else {
-            return ("Error: 云编译还没配好 —— \(GitHubPush.shared.readinessHint)。"
+        // [R53-自动推送目标] 不再要求预先手动配置仓库：
+        // 已配置 → 沿用旧仓库（老项目一直升级同一个仓）；
+        // 没配置 → 用项目名自动建仓 + 装好编译工作流。
+        // 项目名从可选参数取，模型不传就回落默认名。
+        let projectName = (args["project"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        do {
+            _ = try await GitHubPush.shared.ensureTarget(projectName: projectName)
+        } catch let e as GitHubPushError {
+            return ("Error: 准备推送目标失败 —— \(e.errorDescription ?? "未知错误")。"
                     + "把这个原因告诉用户，不要重试。", false)
+        } catch {
+            return ("Error: 准备推送目标失败 —— \(error.localizedDescription)。不要重试。", false)
         }
 
         // ── 参数 ──────────────────────────────────────────────

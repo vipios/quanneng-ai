@@ -218,8 +218,8 @@ configure_rootfs() {
     # Configure /etc/profile for better shell experience
     cat >> "$ROOTFS_DATA/etc/profile" << 'EOF'
 
-# MinisApp iSH Configuration
-export PS1='\u@minis:\w\$ '
+# QuanNengAI iSH Configuration
+export PS1='\u@quanNengAI:\w\$ '
 export TERM=xterm-256color
 export HOME=/root
 export LANG=C.UTF-8
@@ -244,7 +244,7 @@ EOF
  | |  | | | | | | \__ \  | |__| | ||  __/
  |_|  |_|_|_| |_|_|___/  |____|_|\__\___|
 
- Welcome to MinisApp Linux Shell
+ Welcome to QuanNengAI Linux Shell
  Alpine Linux aarch64 on iSH-ARM64 Emulator
 
 EOF

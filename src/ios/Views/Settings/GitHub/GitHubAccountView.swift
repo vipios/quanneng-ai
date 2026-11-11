@@ -499,7 +499,8 @@ struct GitHubAccountView: View {
             Text("推送目标")
         } footer: {
             VStack(alignment: .leading, spacing: 6) {
-                Text("仓库填 `用户名/仓库名` 就行，整条网址粘进来也可以（会自动截成两段）。这个仓库要提前建好，并在里面放好编译工作流。")
+                // [R53-自动推送目标] 不填也能推：没配置时推送会自动建仓。
+                Text("这里可以不填 —— 没配置时，推送会自动用项目名创建新仓库并装好编译工作流；配置过就一直沿用同一个仓库升级（老项目不再重复建）。要指定仓库才填 `用户名/仓库名`。")
                 Text("当前状态：\(store.cloudReadiness)")
                     .foregroundColor(store.canUseCloudBuild ? .green : .secondary)
             }

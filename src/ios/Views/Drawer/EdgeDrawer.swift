@@ -477,21 +477,32 @@ private struct EdgePanOverlay: UIViewRepresentable {
         var activeWidth: CGFloat = 0          // >0 表示抽屉开着，整片可接管
         var edgeSlop: CGFloat = DrawerState.edgeSlop
 
-        /// [R52-返回键点不了·真根因] 顶部导航栏高度。
+        /// [R52-返回键热区小·真根因] 顶部导航栏高度。
         ///
-        /// 为什么不能用 `safeAreaInsets.top`：这个桥接 UIView 挂在
-        /// SwiftUI 的 ZStack 上，UIKit 侧它不是布局顶层，自己的
-        /// `safeAreaInsets` 经常是 0 —— R45 那版挖洞算出来 0+44=44，
-        /// 只挖掉了状态栏；返回键 ‹ 实际在 y≈54~98 的导航栏区域，
-        /// 没挖到，等于白挖。build 58 装机「返回键还是点不了」。
+        /// 返回键 ‹ 是系统 NavigationStack 的默认返回键，热区约 44×44，
+        /// 中心在导航栏内（y ≈ 状态栏 + 22）。它在屏幕左边缘 edgeSlop(44)
+        /// 之内 —— 而手势层对左边缘内 `point.x <= edgeSlop` 返回 true 会
+        /// 把点击整个吞掉。所以要靠 `point.y < navBarBottom` 把导航栏
+        /// 区域挖掉，让返回键的触摸穿透下去。
         ///
-        /// 改用 window 的 safeAreaInsets（hitTest 时视图已挂进 window
-        /// 层级，window 的值是真机值：刘海屏 59、老机型 20）。
-        /// 兜底 59 覆盖最常见机型；拿不到 window 时 59+44=103 也
-        /// 足够盖住导航栏（刘海机导航栏底 ≈103）。
+        /// 之前两版挖洞都不够：
+        ///   · R45 用 `safeAreaInsets.top`，桥接 UIView 自身值常为 0，
+        ///     挖出来 44 只盖住状态栏，返回键没挖到 → 完全点不了；
+        ///   · R52 用 `window?.safeAreaInsets.top`，但 SwiftUI 托管的
+        ///     UIView 的 `window` 属性在 hitTest 时经常还是 nil，走兜底
+        ///     59+44=103 差一点点，返回键下半仍在手势层里 → 「要点到
+        ///     图标正上方精确位置才反应」。
+        ///
+        /// 现在改用 UIApplication 的 keyWindow（hitTest 时一定拿得到），
+        /// 并且挖到「导航栏底 + 12pt 余量」= 状态栏 + 56，把返回键的
+        /// 44×44 热区整个盖住。兜底 59+56=115 也足够。
         private var navBarBottom: CGFloat {
-            let top = window?.safeAreaInsets.top ?? 59
-            return top + 44
+            let keyWindow = UIApplication.shared.connectedScenes
+                .compactMap { $0 as? UIWindowScene }
+                .flatMap(\.windows)
+                .first(where: \.isKeyWindow)
+            let top = keyWindow?.safeAreaInsets.top ?? 59
+            return top + 56
         }
 
         override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {

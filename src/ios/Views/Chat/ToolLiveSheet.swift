@@ -1159,7 +1159,7 @@ struct ToolLiveSheet: View {
                 // out to the step pill's trailing column (under the
                 // elapsed-duration "5s" text) so it lives next to where the
                 // user is already scanning timing info.
-                Text("全能AI Computer")
+                Text("全能AI 电脑")
                     .font(.system(size: 15, weight: .semibold))
 
                 Spacer()

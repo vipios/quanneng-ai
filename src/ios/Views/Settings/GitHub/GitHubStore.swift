@@ -419,11 +419,15 @@ final class GitHubStore: ObservableObject {
     func triggerCloudBuild(
         files: [RepoFile],
         message: String,
-        inputs: [String: String] = [:]
+        inputs: [String: String] = [:],
+        projectName: String = ""
     ) async throws {
         guard canUseCloudBuild else {
             throw GitHubPushError.notSignedIn
         }
+        // [R53-自动推送目标] 已配置沿用旧仓库，没配置自动建仓。
+        // 用户不用再手动填「推送目标」。
+        _ = try await GitHubPush.shared.ensureTarget(projectName: projectName)
         lastDecision = BuildDecision(
             route: .github,
             reason: "推送 \(files.count) 个文件到 \(GitHubPush.shared.repo)",

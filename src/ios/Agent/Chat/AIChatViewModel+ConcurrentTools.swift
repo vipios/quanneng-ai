@@ -177,7 +177,7 @@ extension AIChatViewModel {
         // tapped Stop short-circuits with a synthetic cancellation result
         // so history stays paired.
         if Task.isCancelled || self.userDidCancel {
-            let cancelContent = "<system-reminder>The user cancelled this operation. The returned result may be incomplete.</system-reminder>"
+            let cancelContent = "<system-reminder>用户已取消此操作，返回的结果可能不完整。</system-reminder>"
             if msgIdx < messages.count, blockIdx < messages[msgIdx].blocks.count {
                 messages[msgIdx].blocks[blockIdx].toolStatus = .cancelled
                 messages[msgIdx].blocks[blockIdx].content = cancelContent
@@ -629,7 +629,7 @@ extension AIChatViewModel {
                 // concurrent execution — sibling shell tasks still need
                 // the signal to abort their own delay loops. The outer
                 // dispatcher resets it once per batch.
-                toolOutput = "<system-reminder>The user cancelled this operation. The returned result may be incomplete.</system-reminder>\n" + result.output
+                toolOutput = "<system-reminder>用户已取消此操作，返回的结果可能不完整。</system-reminder>\n" + result.output
                 cancelledHere = true
             } else {
                 toolOutput = result.output
@@ -1071,7 +1071,7 @@ extension AIChatViewModel {
             toolSuccess = false
         }
         } catch is CancellationError {
-            let cancelContent = "<system-reminder>The user cancelled this operation. The returned result may be incomplete.</system-reminder>"
+            let cancelContent = "<system-reminder>用户已取消此操作，返回的结果可能不完整。</system-reminder>"
             let existing = (msgIdx < messages.count && blockIdx < messages[msgIdx].blocks.count)
                 ? messages[msgIdx].blocks[blockIdx].content : ""
             toolOutput = existing.isEmpty ? cancelContent : existing + "\n" + cancelContent
@@ -1089,7 +1089,7 @@ extension AIChatViewModel {
         // Tail cancel-detection: if Task got cancelled mid-execution.
         if !cancelledHere && Task.isCancelled && self.userDidCancel {
             cancelledHere = true
-            toolOutput += "\n<system-reminder>The user cancelled this operation. The returned result may be incomplete.</system-reminder>"
+            toolOutput += "\n<system-reminder>用户已取消此操作，返回的结果可能不完整。</system-reminder>"
             if msgIdx < messages.count, blockIdx < messages[msgIdx].blocks.count {
                 messages[msgIdx].blocks[blockIdx].content = toolOutput
                 messages[msgIdx].blocks[blockIdx].toolStatus = .cancelled

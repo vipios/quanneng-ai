@@ -172,7 +172,11 @@ class RootfsManager {
             try discardOldRootfs()
         }
 
-        guard !isInstalled else {
+        if isInstalled {
+            // [R53-终端提示符改名] rootfs 只装一次、之后不更新 —— 老用户
+            // 的 /etc/profile 里还是旧提示符 \u@minis。这里幂等修补：
+            // 检测到旧值就替换成 quanNengAI，成本是一次几 KB 的文件读写。
+            patchProfilePromptIfNeeded()
             logger.info("[Rootfs] already installed (\(currentArch)) at \(rootfsPath.path)")
             return
         }
@@ -211,6 +215,27 @@ class RootfsManager {
         UserDefaults.standard.set(true, forKey: "rootfs.freshInstall")
 
         logger.info("[Rootfs] installation complete (\(currentArch)) at \(rootfsPath.path)")
+    }
+
+    /// [R53-终端提示符改名] 把已安装 rootfs 里 /etc/profile 的旧提示符
+    /// `\u@minis` 修成 `\u@quanNengAI`。
+    ///
+    /// 幂等：新 rootfs（已是 quanNengAI）或 profile 不存在时直接返回，
+    /// 不写文件。每次启动都跑一次，代价可忽略。
+    private func patchProfilePromptIfNeeded() {
+        let profilePath = dataPath.appendingPathComponent("etc/profile")
+        guard let old = try? String(contentsOf: profilePath, encoding: .utf8) else { return }
+        guard old.contains("@minis") else { return }
+        let fixed = old
+            .replacingOccurrences(of: "\\u@minis:", with: "\\u@quanNengAI:")
+            .replacingOccurrences(of: "Welcome to MinisApp", with: "Welcome to QuanNengAI")
+        guard fixed != old else { return }
+        do {
+            try fixed.write(to: profilePath, atomically: true, encoding: .utf8)
+            logger.info("[Rootfs] /etc/profile 提示符已从 minis 改为 quanNengAI")
+        } catch {
+            logger.warning("[Rootfs] 写 /etc/profile 失败（保留旧提示符）: \(error.localizedDescription)")
+        }
     }
 
     /// Reset (delete) the rootfs, forcing a fresh install on next launch

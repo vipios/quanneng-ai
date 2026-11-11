@@ -176,6 +176,155 @@ final class GitHubPush {
         return false
     }
 
+    // MARK: - [R53-自动推送目标] 已配置沿用，没配置自动建仓
+
+    /// 推送前确保目标仓库就绪。用户原话：
+    /// 「每次别让我去创建推送目标……老的项目进行升级就要查询之前的仓库，
+    ///   在他的基础上进行升级，就像咱们的这个 ipa 一样，一直在推送升级，
+    ///   使用的同一个仓库；新的项目就要用新的项目去命名仓库名」。
+    ///
+    /// 逻辑：
+    ///   1. 已配置合法仓库 → 直接沿用（老项目升级，不动配置）
+    ///   2. 没配置 → 用 projectName 自动创建新仓库
+    ///      （POST /user/repos，token 的 repo scope 就够），
+    ///      名字归一化成 GitHub 规则（空格→-、非法字符剔除），
+    ///      撞名时 GitHub 会 422，此时说明仓库已存在，直接沿用。
+    ///   3. 新建好的仓库里没有任何 workflow，触发编译必然 404 ——
+    ///      所以建仓后立刻把最小可用的编译工作流推进去。
+    ///
+    /// - Parameter projectName: 项目名（用作仓库名）。空时回落「App-Projects」。
+    /// - Returns: 实际使用的仓库（owner/name），新建时也有值。
+    func ensureTarget(projectName: String) async throws -> String {
+        // 1. 已配置：老项目升级，直接用。
+        if !repo.isEmpty, repo.split(separator: "/").count == 2 {
+            return repo
+        }
+
+        // 2. 没配置：自动建仓。
+        guard let token = GitHubAuth.shared.token() else { throw GitHubPushError.notSignedIn }
+        guard let owner = GitHubAuth.shared.account?.login else {
+            throw GitHubPushError.notSignedIn
+        }
+
+        let name = Self.repoName(from: projectName)
+        let created = try await createRepo(token: token, name: name)
+
+        // 3. 配置写进 UserDefaults —— 下次推送直接沿用同一个仓库。
+        repo = "\(owner)/\(created)"
+        // 分支/workflow 保持默认（main / build.yml）。
+
+        // 4. 新仓库是空的，Actions 没有工作流就没法触发。
+        //    推一个最小可用的编译工作流进去（幂等：已有就不覆盖）。
+        try await ensureWorkflowInstalled(token: token)
+
+        return repo
+    }
+
+    /// 项目名 → 合法仓库名。GitHub 规则：字母/数字/-/_/.，不能以 - 开头。
+    static func repoName(from projectName: String) -> String {
+        let trimmed = projectName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let base = trimmed.isEmpty ? "App-Projects" : trimmed
+        // 空格转 -，其余非法字符剔除
+        var out = ""
+        for ch in base {
+            if ch == " " { out.append("-"); continue }
+            if ch.isLetter || ch.isNumber || ch == "-" || ch == "_" || ch == "." {
+                out.append(ch)
+            }
+        }
+        let cleaned = out.isEmpty ? "App-Projects" : out
+        // 只保留前两段万一传进来的是带路径的
+        return cleaned.split(separator: "/").map(String.init).first ?? cleaned
+    }
+
+    /// 创建仓库。返回实际可用的仓库名（撞名 422 时返回原名 —— 已存在）。
+    private func createRepo(token: String, name: String) async throws -> String {
+        let url = URL(string: "\(api)/user/repos")!
+        let body: [String: Any] = [
+            "name": name,
+            "private": false,
+            "auto_init": false,      // 不带 README，空仓库直接推
+            "description": "由全能AI创建的云编译仓库",
+        ]
+        let (data, resp) = try await send(url: url, method: "POST", token: token, body: body)
+        let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+        if code == 201 {
+            // 创建成功，返回 GitHub 规范化后的名字
+            if let doc = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+               let n = doc["name"] as? String {
+                return n
+            }
+            return name
+        }
+        if code == 422 {
+            // 仓库已存在 —— 沿用同名仓库（老项目场景：本地配置丢了但仓库还在）
+            return name
+        }
+        throw try mapError(code: code, data: data)
+    }
+
+    /// 新仓库里没有 workflow，触发编译必然 404。
+    /// 推一个最小可用的 workflow_dispatch 工作流（C 编译 + 出产物 artifact）。
+    /// 已存在同名文件时不覆盖（老仓库的工作流以仓库里的为准）。
+    private func ensureWorkflowInstalled(token: String) async throws {
+        // 查一下默认分支上有没有这个 workflow 文件
+        let checkURL = URL(string: "\(api)/repos/\(repo)/contents/.github/workflows/\(workflowFile)?ref=\(branch)")!
+        let (cdata, cresp) = try await send(url: checkURL, method: "GET", token: token, body: nil)
+        if (cresp as? HTTPURLResponse)?.statusCode == 200 {
+            return  // 已有，不覆盖
+        }
+
+        let yaml = Self.minimalWorkflowYAML(fileName: workflowFile)
+        let files = [RepoFile(path: ".github/workflows/\(workflowFile)", text: yaml)]
+        _ = try await push(files: files, message: "ci: 添加云编译工作流（由全能AI自动初始化）")
+        // workflow 刚提交 GitHub 需要一点时间索引，等 2 秒让第一次 dispatch 更稳。
+        try? await Task.sleep(nanoseconds: 2_000_000_000)
+    }
+
+    /// 最小可用的编译工作流。真正的编译指令由推送的源码自己带（Makefile /
+    /// build.sh），这里只负责「能被 dispatch、能上传产物」。
+    static func minimalWorkflowYAML(fileName: String) -> String {
+        """
+        name: Build
+        on:
+          workflow_dispatch:
+            inputs:
+              build_cmd:
+                description: '编译命令（在仓库根目录执行）'
+                required: false
+                default: 'make'
+          push:
+            branches: [main]
+        permissions:
+          contents: read
+        jobs:
+          build:
+            runs-on: ubuntu-latest
+            timeout-minutes: 30
+            steps:
+              - uses: actions/checkout@v4
+              - name: Build
+                run: |
+                  CMD="${{ github.event.inputs.build_cmd || 'make' }}"
+                  echo "执行: $CMD"
+                  bash -c "$CMD" || echo "::warning::编译命令退出非零（仓库里可能还没有构建脚本）"
+              - name: Collect artifacts
+                if: always()
+                run: |
+                  mkdir -p out
+                  find . -maxdepth 2 -type f \\( -name "*.app" -o -name "*.ipa" -o -name "*.zip" -o -name "*.apk" -o -name "*.exe" -o -name "*.out" -o -name "*.so" -o -name "*.dylib" -o -name "*.a" \\) \\
+                    -exec cp {} out/ \\; 2>/dev/null || true
+                  ls -lh out/ || echo "没有可收集的产物"
+              - name: Upload artifacts
+                if: always()
+                uses: actions/upload-artifact@v4
+                with:
+                  name: build-output
+                  path: out/
+                  if-no-files-found: ignore
+        """
+    }
+
     /// 还差什么，给界面一句话
     var readinessHint: String {
         // [R40-密令登录] 这里原来第一句是「App 没配 Client ID，登录做不了」。

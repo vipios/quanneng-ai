@@ -115,8 +115,14 @@ struct SessionDrawer: View {
         // 改 currentSessionId。在这里观察它的变化，既能保证「切成功才关」，
         // 也不用和行的 Button 抢手势优先级。旧写法是先 onOpenSession 再
         // close，顺序反了会在新页面上看到抽屉飘一下。
-        .onChange(of: currentSessionId) { newValue in
-            if newValue != nil, drawerState.isOpen {
+        //
+        // [R52-删对话后抽屉不关] 原来只在 newValue != nil 时才关（切到
+        // 某会话）。但删除当前会话后 currentSessionId 变 nil（回到列表），
+        // 这个条件不满足 → 抽屉一直开着、遮罩盖着，右侧还残留被删对话
+        // 的画面。改成「变了就关」（不管切去会话还是回到列表）——
+        // 从抽屉里点会话会走到这、删除后回列表也走到这，都该关。
+        .onChange(of: currentSessionId) { _ in
+            if drawerState.isOpen {
                 drawerState.close()
             }
         }
@@ -128,22 +134,19 @@ struct SessionDrawer: View {
 
     /// 右下角悬浮齿轮。
     ///
-    /// 52pt 是 R28 定的：手指点击目标下限 44pt，52 留出一点视觉呼吸。
-    /// 阴影用两层（一层轮廓 + 一层扩散）而不是 `.shadow` 单层，
-    /// 单层在浅色背景上会糊成一圈灰边。
+    /// [R53-齿轮样式] 用户原话「放大一些，用蓝色气泡，齿轮加粗」：
+    /// 气泡 56pt（原 52），蓝底白齿轮（与「新建任务」主色一致），
+    /// 图标加粗（.bold）。阴影保留两层防灰边。
     private var settingsGear: some View {
         Button {
             onOpenSettings()
         } label: {
-            Image(systemName: "gearshape")
-                .font(.system(size: 22, weight: .regular))
-                .foregroundStyle(Color(.label))
-                .frame(width: 52, height: 52)
-                .background(Color(.secondarySystemGroupedBackground), in: Circle())
-                .overlay {
-                    Circle().strokeBorder(Color(.separator).opacity(0.5), lineWidth: 0.5)
-                }
-                .shadow(color: .black.opacity(0.13), radius: 12, y: 2)
+            Image(systemName: "gearshape.fill")
+                .font(.system(size: 26, weight: .bold))
+                .foregroundStyle(.white)
+                .frame(width: 56, height: 56)
+                .background(Color.accentColor, in: Circle())
+                .shadow(color: Color.accentColor.opacity(0.35), radius: 10, y: 3)
         }
         .buttonStyle(.plain)
         .padding(.trailing, 14)
@@ -479,11 +482,12 @@ struct SessionDrawer: View {
 
     // MARK: 两个入口（全部产物 / 新建任务）
 
-    /// [R46-对齐R40] 搜索框正下方的两个入口。
-    /// 左边「全部产物」带产物计数角标 + 右箭头，点击原地展开折叠区；
-    /// 右边「新建任务」是主色。
+    /// [R52-上下排列] 搜索框正下方的两个入口。
+    /// 用户原话：「他们俩没对齐，可以改成上下排列，不要一排，气泡统一。
+    /// 背景蓝色字体白色」。两个入口各占一整行，同一个气泡样式
+    /// （同高、同圆角、同内边距），「新建任务」用蓝底白字的主色。
     private var actionBar: some View {
-        HStack(spacing: 10) {
+        VStack(spacing: 8) {
             Button {
                 withAnimation(.easeInOut(duration: 0.2)) {
                     artifactsExpanded.toggle()
@@ -538,10 +542,12 @@ struct SessionDrawer: View {
                         .font(.system(size: 14, weight: .semibold))
                     Text("新建任务")
                         .font(.system(size: 13, weight: .semibold))
+                    Spacer(minLength: 0)
                 }
                 .foregroundStyle(.white)
-                .padding(.horizontal, 14)
+                .padding(.horizontal, 10)
                 .padding(.vertical, 8)
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .background(Color.accentColor,
                             in: RoundedRectangle(cornerRadius: 10, style: .continuous))
             }
