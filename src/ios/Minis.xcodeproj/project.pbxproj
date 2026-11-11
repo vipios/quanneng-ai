@@ -235,6 +235,7 @@
 		E5CSSPL022B /* ChatStore+SyncRemoteRecords.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5CSSPL022R /* ChatStore+SyncRemoteRecords.swift */; };
 		E5CSSPL023B /* ChatStore+BackupRestore.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5CSSPL023R /* ChatStore+BackupRestore.swift */; };
 		E5CVSET0000000000000A001 /* SettingsSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5CVSET0000000000000A011 /* SettingsSheet.swift */; };
+		E5RLBL0000000000000B001 /* SettingsRowLabel.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5RLBL0000000000000B011 /* SettingsRowLabel.swift */; };
 		E5DSGN00000000000004301 /* SpeakModeSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5DSGN00000000000004311 /* SpeakModeSettings.swift */; };
 		E5DSGN00000000000004201 /* SettingsDesignTokens.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5DSGN00000000000004211 /* SettingsDesignTokens.swift */; };
 		C40000000000000000000006 /* GitHubCloudBuildTool.swift in Sources */ = {isa = PBXBuildFile; fileRef = C40100000000000000000006 /* GitHubCloudBuildTool.swift */; };
@@ -1041,6 +1042,7 @@
 		E5CSSPL022R /* ChatStore+SyncRemoteRecords.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ChatStore+SyncRemoteRecords.swift"; sourceTree = "<group>"; };
 		E5CSSPL023R /* ChatStore+BackupRestore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ChatStore+BackupRestore.swift"; sourceTree = "<group>"; };
 		E5CVSET0000000000000A011 /* SettingsSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsSheet.swift; sourceTree = "<group>"; };
+		E5RLBL0000000000000B011 /* SettingsRowLabel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsRowLabel.swift; sourceTree = "<group>"; };
 		E5DSGN00000000000004311 /* SpeakModeSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeakModeSettings.swift; sourceTree = "<group>"; };
 		E5DSGN00000000000004211 /* SettingsDesignTokens.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsDesignTokens.swift; sourceTree = "<group>"; };
 		C40100000000000000000006 /* GitHubCloudBuildTool.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubCloudBuildTool.swift; sourceTree = "<group>"; };
@@ -2730,6 +2732,7 @@
 				E5SHV0104 /* MountDetailView.swift */,
 				E5SOUL102 /* SoulSettingsView.swift */,
 				E5CVSET0000000000000A011 /* SettingsSheet.swift */,
+				E5RLBL0000000000000B011 /* SettingsRowLabel.swift */,
 				E5DSGN00000000000004311 /* SpeakModeSettings.swift */,
 				E5DSGN00000000000004211 /* SettingsDesignTokens.swift */,
 				E5SUPD0000000000000A011 /* SelfUpdate.swift */,
@@ -3637,6 +3640,7 @@
 				E5SOUL001 /* SoulStore.swift in Sources */,
 				E5SOUL002 /* SoulSettingsView.swift in Sources */,
 				E5CVSET0000000000000A001 /* SettingsSheet.swift in Sources */,
+				E5RLBL0000000000000B001 /* SettingsRowLabel.swift in Sources */,
 				E5DSGN00000000000004301 /* SpeakModeSettings.swift in Sources */,
 				E5DSGN00000000000004201 /* SettingsDesignTokens.swift in Sources */,
 				E5SUPD0000000000000A001 /* SelfUpdate.swift in Sources */,
