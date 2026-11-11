@@ -158,10 +158,24 @@ enum SelfUpdate {
         let apiTemplate: String
     }
 
-    /// 四条线路。2026-11-10 实测：ghfast 最快，ghproxy.net 次之，
-    /// 直连在国内多数时候打不通，gh-proxy.com 最慢但活着。
+    /// 候选线路池。
     ///
-    /// 顺序不代表优先级 —— 每次都是并发竞速，谁快用谁。
+    /// [R59-全线路池] 从 4 条扩到 11 条。用户原话：「把所有的加速器线路都
+    /// 放进去，让他自动判定哪个最快，然后就用哪条线路更新」。
+    ///
+    /// 为什么之前只有 4 条会出事：加速站存活率很低，2026-11-11 实测
+    /// 13 个备选里只有 4 个能下（ghfast / gh-proxy.com / gh-proxy.org /
+    /// ghproxy.imciel.com），其余全是 000/404/502/522。池子太小，
+    /// 死了两条就只剩「44 分钟才下完」的那条，表现为永远 0%。
+    ///
+    /// ⚠️ 顺序完全不代表优先级，每次都是并发实测、按真实下载速度选。
+    /// 名单里保留了一些**当前不可用**的地址：加速站是时好时坏的，
+    /// 今天 502 明天可能就通了，留着让它自己参与竞速，失败了也只是
+    /// 多一个 nil，不影响选线。
+    ///
+    /// `apiTemplate` 只对「能代理 API」的站有意义；不代理 api.github.com
+    /// 的站会返回 403，那种情况下 `probe` 依然能靠其它站的 release 信息
+    /// 拿到资产列表 —— 见 `race` 里「候选实测下载速度」那段的说明。
     static let lines: [Line] = [
         Line(id: "fast",
              name: "加速 A",
@@ -171,14 +185,42 @@ enum SelfUpdate {
              name: "加速 B",
              prefix: "https://ghproxy.net/",
              apiTemplate: "https://ghproxy.net/https://api.github.com/repos/%@/releases/latest"),
-        Line(id: "direct",
-             name: "直连",
-             prefix: "",
-             apiTemplate: "https://api.github.com/repos/%@/releases/latest"),
         Line(id: "slow",
              name: "加速 C",
              prefix: "https://gh-proxy.com/",
              apiTemplate: "https://gh-proxy.com/https://api.github.com/repos/%@/releases/latest"),
+        Line(id: "org",
+             name: "加速 D",
+             prefix: "https://gh-proxy.org/",
+             apiTemplate: "https://gh-proxy.org/https://api.github.com/repos/%@/releases/latest"),
+        Line(id: "imciel",
+             name: "加速 E",
+             prefix: "https://ghproxy.imciel.com/",
+             apiTemplate: "https://ghproxy.imciel.com/https://api.github.com/repos/%@/releases/latest"),
+        Line(id: "cfd",
+             name: "加速 F",
+             prefix: "https://ghproxy.cfd/",
+             apiTemplate: "https://ghproxy.cfd/https://api.github.com/repos/%@/releases/latest"),
+        Line(id: "llkk",
+             name: "加速 G",
+             prefix: "https://gh.llkk.cc/",
+             apiTemplate: "https://gh.llkk.cc/https://api.github.com/repos/%@/releases/latest"),
+        Line(id: "xxooo",
+             name: "加速 H",
+             prefix: "https://gh.xxooo.cf/",
+             apiTemplate: "https://gh.xxooo.cf/https://api.github.com/repos/%@/releases/latest"),
+        Line(id: "moeyy",
+             name: "加速 I",
+             prefix: "https://github.moeyy.xyz/",
+             apiTemplate: "https://github.moeyy.xyz/https://api.github.com/repos/%@/releases/latest"),
+        Line(id: "cn",
+             name: "加速 J",
+             prefix: "https://ghproxy.cn/",
+             apiTemplate: "https://ghproxy.cn/https://api.github.com/repos/%@/releases/latest"),
+        Line(id: "direct",
+             name: "直连",
+             prefix: "",
+             apiTemplate: "https://api.github.com/repos/%@/releases/latest"),
     ]
 
     /// 单条线路的超时。实测直连经常 3-8 秒才失败，9 秒是「基本确定不行」的位置。
@@ -213,7 +255,7 @@ enum SelfUpdate {
     /// 就是有新版本。锚点在每次下载成功后更新。
     static func check() async -> Outcome {
         guard let win = await race(repo: builtinRepo) else {
-            return Outcome(result: .failed(reason: "四条线路都连不上，检查一下网络"),
+            return Outcome(result: .failed(reason: "所有线路都连不上，检查一下网络"),
                            win: nil)
         }
 
@@ -266,6 +308,11 @@ enum SelfUpdate {
         let assetUpdatedAt: String
         /// [R50] 给界面显示的一行版本标识，如「build 58」。
         let buildLabel: String
+        /// [R59] 这条线路实测下载速度（B/s）。0 表示没测出/测不通。
+        ///
+        /// 有默认值：`probe` 里构造只带版本事实、不测速，`race` 最后
+        /// 才把实测结果填进来。默认值让两处构造都不用改签名。
+        var measuredSpeed: Double = 0
     }
 
     /// 全部线路同时打，第一个拿到有效 release 的胜出。
@@ -273,21 +320,116 @@ enum SelfUpdate {
     /// 用 `withTaskGroup` 而不是 detached task：group 退出时会等所有
     /// 子任务收尾，不会留野任务在后台跑。提前获胜时 `cancelAll()`，
     /// 已发出的请求靠 timeoutInterval 自然结束。
+    ///
+    /// [R59-全线路池] 选线路。分三步，全程以**真实下载速度**为唯一标准。
+    ///
+    /// 用户原话：「把所有的加速器线路都放进去，让他自动判定哪个最快，
+    /// 然后就用哪条线路更新」。
+    ///
+    /// ── 第一步：取 release 事实 ──
+    /// 并发拿 release 元信息（版本号、asset 直链、大小、updated_at）。
+    /// 这一步**只需要一条线路成功**，因为事实是全局唯一的。
+    ///
+    /// ── 第二步：全部线路参与下载测速 ──
+    /// 这里是最关键的修正。原来只有「API 探通」的线路才能进候选，
+    /// 而 2026-11-11 实测 ghfast / ghproxy 的 **API 返回 403**
+    /// （那类加速站只代理 release 下载，不代理 api.github.com）。
+    /// 结果就是：下载最快的 ghfast 被 API 403 淘汰，只剩 gh-proxy
+    /// （下 77MB 要 43 分钟）和直连 —— 于是进度永远 0%。
+    ///
+    /// 现在把「有什么版本」和「从哪下」彻底解耦：release 信息拿一次，
+    /// 然后 `lines` 里**每一条**都用拿到的 asset 直链去实测下载速度，
+    /// 不管它的 API 通不通。
+    ///
+    /// ── 第三步：选最快的 ──
+    /// 速度最高的那条即为结果；全都测不出速度时退回直连。
     static func race(repo: String) async -> Win? {
-        await withTaskGroup(of: Win?.self) { group in
+        // ① 取 release 元信息（任一条成功即可，事实上并行等价）。
+        let informants: [Win] = await withTaskGroup(of: Win?.self) { group in
             for line in lines {
                 group.addTask { await probe(line: line, repo: repo) }
             }
-
-            var winner: Win?
+            var out: [Win] = []
             for await w in group {
-                if let w {
-                    winner = w
-                    group.cancelAll()
-                    break
-                }
+                if let w { out.append(w) }
             }
-            return winner
+            return out
+        }
+        // 优先用「带 asset 直链」的那条信息：API 通不代表 release 里有包，
+        // 而测速必须有直链。全都没有 asset 时才退回第一条，
+        // 让上层如实报「这个版本里没有可安装的包」。
+        guard let fact = informants.first(where: { $0.ipaURL?.isEmpty == false })
+                ?? informants.first
+        else { return nil }
+
+        // 没有 asset 直链就无从下载，也没法测速 —— 直接把事实返回，
+        // 让上层如实报「这个版本里没有可安装的包」。
+        guard let rawURL = fact.ipaURL, !rawURL.isEmpty else { return fact }
+
+        // ② 每条线路都拿同一条 asset 直链组出自己的下载地址，实测速度。
+        //
+        // 用 (Line, Double) 无名元组而不是带标签的：`withTaskGroup(of:)`
+        // 的元素类型必须与闭包返回类型逐字一致，带标签的元组和无名元组
+        // 在 Swift 里是两个类型，混用会编译失败。
+        let measured: [(Line, Double)] = await withTaskGroup(
+            of: (Line, Double).self
+        ) { group in
+            for line in lines {
+                group.addTask { (line, await measureDownloadSpeed(prefix: line.prefix,
+                                                                  rawURL: rawURL)) }
+            }
+            var out: [(Line, Double)] = []
+            for await pair in group { out.append(pair) }
+            return out
+        }
+
+        // ③ 取最快。完全并列或全为 0 时按池内顺序兜底（直连在最后）。
+        var bestLine: Line = lines.last ?? fact.line
+        var bestSpeed: Double = 0
+        for m in measured where m.1 > bestSpeed {
+            bestSpeed = m.1
+            bestLine = m.0
+        }
+        if bestSpeed <= 0 {
+            // 一条都测不通：保留 API 探通的那条（至少没有更差的选项）。
+            bestLine = fact.line
+        }
+
+        // 把「版本事实」和「下载线路」重新组合成一个 Win：
+        // tag / 资产 / 大小 / updated_at 都来自 fact，
+        // line 换成实测最快的那条（下载地址由 downloadURL 用它拼）。
+        return Win(tag: fact.tag, line: bestLine, ms: fact.ms,
+                   ipaName: fact.ipaName, ipaURL: fact.ipaURL, ipaSize: fact.ipaSize,
+                   assetUpdatedAt: fact.assetUpdatedAt, buildLabel: fact.buildLabel,
+                   measuredSpeed: bestSpeed)
+    }
+
+    /// 用指定线路前缀 + asset 直链组地址，拉前 256KB 实测速度（B/s）。
+    ///
+    /// 用 Range 只取一小段，不把 77MB 拖下来。256KB 足够区分
+    /// 「几百 KB/s」和「十几 KB/s」，实测 ghfast 拿 256KB 约 2~3 秒。
+    ///
+    /// 失败或拿不到数据返回 0 —— 0 会被当成「最慢」，自然落选。
+    private static func measureDownloadSpeed(prefix: String, rawURL: String) async -> Double {
+        guard let url = URL(string: prefix + rawURL) else { return 0 }
+
+        var req = URLRequest(url: url)
+        req.timeoutInterval = 12
+        req.cachePolicy = .reloadIgnoringLocalCacheData
+        req.setValue("bytes=0-262143", forHTTPHeaderField: "Range")
+        req.setValue("Minis-SelfUpdate", forHTTPHeaderField: "User-Agent")
+
+        let t0 = Date()
+        do {
+            let (data, resp) = try await URLSession.shared.data(for: req)
+            let dt = Date().timeIntervalSince(t0)
+            guard let http = resp as? HTTPURLResponse,
+                  (200..<300).contains(http.statusCode),
+                  !data.isEmpty, dt > 0
+            else { return 0 }
+            return Double(data.count) / dt
+        } catch {
+            return 0
         }
     }
 
@@ -399,18 +541,66 @@ enum SelfUpdate {
         req.timeoutInterval = 300
         req.setValue("Minis-SelfUpdate", forHTTPHeaderField: "User-Agent")
 
-        let delegate = ProgressDelegate(onProgress: onProgress)
+        let delegate = ProgressDelegate(
+            onProgress: onProgress,
+            onStall: {
+                // 看门狗判定卡死：先给界面一个明确的信号（-2 = 卡死），
+                // 再由 delegate 自己取消正在跑的下载任务。
+                onProgress(-2, 0)
+            }
+        )
         // [R55] 兜底总量用 release 里的 asset.size —— 代理不返回
         // Content-Length 时，进度用它来算百分比，不会一直转圈。
         delegate.setExpectedFallback(win.ipaSize)
 
         let cfg = URLSessionConfiguration.default
         cfg.timeoutIntervalForRequest = req.timeoutInterval
-        let session = URLSession(configuration: cfg, delegate: delegate, delegateQueue: nil)
-        defer { session.finishTasksAndInvalidate() }
 
+        // [R59-不再无限转圈] 三处兜底，缺一个都会重现「一直 0% 转圈」：
+        //
+        // 1. `timeoutIntervalForResource` —— 整个资源传输的总时限。
+        //    **这是关键**：它的默认值是 7 天。原来只设了
+        //    `timeoutIntervalForRequest`（那是「两次收到数据之间的间隔」），
+        //    于是一条 13KB/s 的慢线路只要还在滴水就永不失败 ——
+        //    77MB 要 1.5 小时，用户看到的就是永远 0%。
+        //    给 6 分钟：按实测 ghfast 581KB/s 下 77MB 约 2 分钟，
+        //    6 分钟有 3 倍余量，真慢到超时也确实该放弃了。
+        //
+        // 2. `waitsForConnectivity = false` —— 默认在 iOS 上为 true，
+        //    没网时 URLSession 会**挂着等网络恢复**而不是立刻报错。
+        //    用户看到的就是「转圈但什么都没发生」。
+        //
+        // 3. `waitsForConnectivity` 关掉后仍可能「连上了但一个字节不来」，
+        //    由 ProgressDelegate 的定时巡检看门狗兜住（见那个类）。
+        cfg.timeoutIntervalForResource = 360
+        cfg.waitsForConnectivity = false
+
+        // [R59] delegate 用一条**显式的串行队列**，而不是 delegateQueue: nil。
+        //
+        // nil 会让 URLSession 自己造一条，我们拿不到它。给一条自己的，
+        // 回调与取消都在可控的队列上，行为可预期。
+        let q = OperationQueue()
+        q.maxConcurrentOperationCount = 1
+        q.name = "SelfUpdate.download"
+
+        let session = URLSession(configuration: cfg, delegate: delegate, delegateQueue: q)
+        // 把 session 交给 delegate：看门狗判定卡死时要靠它取消下载。
+        delegate.attach(session: session)
+        defer {
+            delegate.stopWatchdog()
+            session.finishTasksAndInvalidate()
+        }
+
+        // 巡检从这一刻就开始计时：哪怕连接阶段一个字节都不来，
+        // 25 秒后也会判定卡死并取消 —— 正是用户截图里那个状态。
+        delegate.startWatchdog(queue: DispatchQueue(label: "SelfUpdate.watchdog"))
+
+        // 只用 `download(for:)` 发一次任务。
+        // 曾经在这里先 downloadTask(with:) 拿句柄、再 download(for:)，
+        // 那会发两个任务、下两遍 77MB —— 不要那么写。
         let (tmp, resp) = try await session.download(for: req)
         delegate.stop()
+        delegate.stopWatchdog()
 
         guard let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
             throw SelfUpdateError.http((resp as? HTTPURLResponse)?.statusCode ?? 0)
@@ -496,8 +686,99 @@ private final class ProgressDelegate: NSObject, URLSessionDownloadDelegate, @unc
     /// Content-Length 补上（见 `download` 里对 resp 的处理）。
     private var expectedFallback: Int64 = 0
 
-    init(onProgress: @escaping @Sendable (Double, Int64) -> Void) {
+    // MARK: [R59] 无进展看门狗
+    //
+    // 「一直 0% 一直转圈」的根因不止超时：慢线路会每几秒滴一个字节，
+    // 使 `timeoutIntervalForResource` 永远不触发（那是总量时限，6 分钟
+    // 才到），而 `timeoutIntervalForRequest` 也因为有数据在动而不触发。
+    // 用户界面上就是「转圈 + 0%」，十几分钟毫无变化。
+    //
+    // ⚠️ 只看 `didWriteData` 是不够的 —— 用户遇到的恰恰是「一个字节都
+    // 不来」（截图 0% 77MB），那时 `didWriteData` **一次都不会被调用**，
+    // 钩子型的看门狗等于不存在。所以这里用一个独立定时器主动巡检：
+    // 不管有没有回调，到点就检查「距离上次进展过了多久」。
+    private var lastSeenBytes: Int64 = 0
+    private var lastGrowthAt = Date()
+    /// 两次增长之间允许的最大间隔（秒）。
+    private static let stallLimit: TimeInterval = 25
+    private var watchdog: DispatchSourceTimer?
+    /// 巡检到卡死时回调。由 download 侧接到进度上报上。
+    private let onStall: @Sendable () -> Void
+    /// 正在下载的 session。卡死时用它取消 —— `invalidateAndCancel` 会把
+    /// 当前所有任务一起撤掉，正是我们要的效果。
+    ///
+    /// 为什么是**强引用**而不是 weak：
+    ///   · `session` 在 `download()` 里只是局部常量，一旦编译器认为它
+    ///     「已经用过了」就可能提前释放，weak 会静默变成 nil ——
+    ///     看门狗判定卡死时取消动作变成空操作，用户还是永远转圈。
+    ///   · 强引用确实会和 session 形成「session 持 delegate / delegate 持
+    ///     session」的环，因此在 `stopWatchdog()` 里必须置 nil 断开。
+    ///     两处配对，不要只改一边。
+    private var session: URLSession?
+
+    func attach(session: URLSession) {
+        lock.lock(); self.session = session; lock.unlock()
+    }
+
+    /// 启动巡检。`queue` 是本类自己的串行队列，不占用 delegate 队列，
+    /// 避免「delegate 回调里再起定时器」造成的自锁风险。
+    func startWatchdog(queue: DispatchQueue) {
+        lock.lock()
+        guard watchdog == nil else { lock.unlock(); return }
+        let t = DispatchSource.makeTimerSource(queue: queue)
+        // 第一次检查放在 stallLimit 之后：刚开始那 25 秒是正常的
+        // 连接 + 握手时间，不该被打断。之后每 2 秒巡一次。
+        t.schedule(deadline: .now() + Self.stallLimit, repeating: 2)
+        t.setEventHandler { [weak self] in
+            guard let self else { return }
+            self.lock.lock()
+            let shouldFire = !self.stopped
+                && Date().timeIntervalSince(self.lastGrowthAt) > Self.stallLimit
+            if shouldFire { self.stopped = true }
+            let s = self.session
+            self.lock.unlock()
+            guard shouldFire else { return }
+            // 先取消下载，再通知界面 —— 顺序反过来界面会在取消完成前
+            // 短暂显示「失败」而进度条还在动。
+            s?.invalidateAndCancel()
+            self.onStall()
+        }
+        watchdog = t
+        lock.unlock()
+        t.resume()
+    }
+
+    func stopWatchdog() {
+        lock.lock()
+        let t = watchdog
+        watchdog = nil
+        // 断开「delegate 强持 session」那条边，否则 session 和 delegate
+        // 互指，这一轮下载的 URLSession 永远不会释放。
+        session = nil
+        lock.unlock()
+        t?.cancel()
+    }
+
+    /// 记一次进度。返回 true 表示判定为卡死。
+    private func noteProgress(_ bytes: Int64) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        let now = Date()
+        if bytes > lastSeenBytes {
+            // 有实质进展就重置计时。阈值用 1KB 而不是 1 字节：
+            // 「每 5 秒滴 3 个字节」那种假活不能算活着。
+            if bytes - lastSeenBytes >= 1024 {
+                lastSeenBytes = bytes
+                lastGrowthAt = now
+            }
+        }
+        return now.timeIntervalSince(lastGrowthAt) > Self.stallLimit
+    }
+
+    init(onProgress: @escaping @Sendable (Double, Int64) -> Void,
+         onStall: @escaping @Sendable () -> Void) {
         self.onProgress = onProgress
+        self.onStall = onStall
     }
 
     func stop() {
@@ -515,8 +796,33 @@ private final class ProgressDelegate: NSObject, URLSessionDownloadDelegate, @unc
                     didWriteData bytesWritten: Int64,
                     totalBytesWritten: Int64,
                     totalBytesExpectedToWrite: Int64) {
+        // downloadTask 参数这里用不到：取消统一走 session.invalidateAndCancel()，
+        // 那样连「还没开始写的任务」也一并撤掉。显式忽略避免警告。
+        _ = downloadTask
+
+        // [R59] 先判定卡死（同一把锁内读写计数，不能读两次）。
+        let stalled = noteProgress(totalBytesWritten)
+
         lock.lock(); let s = stopped; let expected = expectedFallback; lock.unlock()
         guard !s else { return }
+
+        // 判定卡死：和定时巡检走同一条取消路径。
+        //
+        // 两处都可能判出卡死（定时器 25 秒一次 + 每次回调一次），
+        // 所以取消要幂等：`stopped` 已在上面被 noteProgress… 之外的
+        // 这里置位，重复进入会直接命中 `guard !s` 返回。
+        if stalled {
+            lock.lock()
+            let already = stopped
+            stopped = true
+            lock.unlock()
+            if !already {
+                onProgress(-2, 0)
+                session.invalidateAndCancel()
+            }
+            return
+        }
+
         let total = totalBytesExpectedToWrite > 0 ? totalBytesExpectedToWrite : expected
         guard total > 0 else {
             // 完全没有总量信息：至少给个「在动」的信号，别让界面以为卡死。

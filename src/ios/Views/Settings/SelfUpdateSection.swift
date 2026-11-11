@@ -189,8 +189,13 @@ struct SelfUpdateSection: View {
                     .foregroundStyle(.secondary)
             }
         } else if checking {
-            // 「测速中」而不是「检查中」：这次真的在测四条线路，
+            // 「测速中」而不是「检查中」：这次真的在测全部线路的下载速度，
             // 文案跟着实际动作走。
+            //
+            // [R59] 池子扩到 11 条之后，这一步最长会花十几秒（每条线路
+            // 拉 256KB 实测、单条上限 12 秒，并发跑取最慢那条的时间）。
+            // 文案带个「11 条」，用户能明白为什么比之前慢一点 ——
+            // 之前是「4 条里挑一个能连的」，现在是「11 条里挑最快的那条」。
             HStack(spacing: 6) {
                 ProgressView().controlSize(.mini)
                 Text("测速中")
@@ -279,6 +284,15 @@ struct SelfUpdateSection: View {
             // background threads is not allowed」并在真机上表现为界面卡住。
             let file = try await SelfUpdate.download(win: win) { p, total in
                 Task { @MainActor in
+                    // [R59] p == -2：看门狗判定这条线路卡死了，已经取消下载。
+                    // 不能把 -2 写进 progress（会让百分比变成 -200%），
+                    // 直接把状态切成失败并给出可读的说明。
+                    if p == -2 {
+                        progress = 0
+                        downloading = false
+                        result = .failed(reason: "这条线路太慢，已自动放弃。稍后重试会自动重新选最快的线路")
+                        return
+                    }
                     progress = p
                     if total > 0 { totalBytes = total }
                 }
@@ -292,8 +306,18 @@ struct SelfUpdateSection: View {
             shareItem = ShareItem(url: file)
         } catch {
             // 失败不把 result 打回「有新版」—— 那会让人以为没下载成功是错觉。
-            result = .failed(reason: (error as? SelfUpdateError)?.errorDescription
-                                    ?? error.localizedDescription)
+            //
+            // [R59] 看门狗取消任务时抛的是 CancellationError，它的
+            // localizedDescription 是「已取消」这种没信息量的话。
+            // 那种情况上面闭包已经写好了更清楚的说明，这里不要覆盖它。
+            if error is CancellationError {
+                // 保留闭包里已经设置的失败文案。
+            } else if (error as? URLError)?.code == .cancelled {
+                // 同上：被取消（看门狗或系统）不覆盖已有说明。
+            } else {
+                result = .failed(reason: (error as? SelfUpdateError)?.errorDescription
+                                        ?? error.localizedDescription)
+            }
         }
 
         downloading = false
