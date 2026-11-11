@@ -253,21 +253,23 @@ class RootfsManager {
         } catch {
             // move 失败（跨卷/权限）就退化成逐个拷贝，不丢数据。
             logger.warning("[Rootfs][R56] move 失败，退化为拷贝: \(error.localizedDescription)")
-            do {
-                try fm.createDirectory(at: newDir, withIntermediateDirectories: true)
-                if let en = fm.enumerator(at: oldDir, includingPropertiesForKeys: nil) {
-                    while let src = en.nextObject() as? URL {
-                        let rel = src.path.replacingOccurrences(of: oldDir.path, with: "")
-                        guard !rel.isEmpty else { continue }
-                        let dst = newDir.appendingPathComponent(rel)
-                        if !fm.fileExists(atPath: dst.path) {
-                            try? fm.createDirectory(at: dst.deletingLastPathComponent(), withIntermediateDirectories: true)
-                            try? fm.copyItem(at: src, to: dst)
-                        }
+            // [R57-编译修复] 这里原来多套了一层 `do {` 却没有 `catch`，
+            // 于是 `try fm.createDirectory` 变成「本作用域内未处理的 throw」，
+            // 直接编译失败（RootfsManager.swift:257）。迁移本身是尽力而为，
+            // 建目录失败也不该让整个函数抛出，改用 `try?` 并压平这层 do。
+            try? fm.createDirectory(at: newDir, withIntermediateDirectories: true)
+            if let en = fm.enumerator(at: oldDir, includingPropertiesForKeys: nil) {
+                while let src = en.nextObject() as? URL {
+                    let rel = src.path.replacingOccurrences(of: oldDir.path, with: "")
+                    guard !rel.isEmpty else { continue }
+                    let dst = newDir.appendingPathComponent(rel)
+                    if !fm.fileExists(atPath: dst.path) {
+                        try? fm.createDirectory(at: dst.deletingLastPathComponent(), withIntermediateDirectories: true)
+                        try? fm.copyItem(at: src, to: dst)
                     }
                 }
-                logger.info("[Rootfs][R56] 拷贝迁移完成 /var/minis → /var/ai")
             }
+            logger.info("[Rootfs][R56] 拷贝迁移完成 /var/minis → /var/ai")
         }
     }
 

@@ -500,15 +500,25 @@ private struct EdgePanOverlay: UIViewRepresentable {
         var activeWidth: CGFloat = 0          // >0 表示抽屉开着，整片可接管
         var edgeSlop: CGFloat = DrawerState.edgeSlop
 
-        /// [R56-返回键·动态穿透] 顶部导航栏底界。
+        /// [R57-返回键·坐标系修正] 这一点是否落在顶部导航栏区域内。
         ///
-        /// 动态取状态栏高度 + 导航栏 44，**不写死固定值**：
-        ///   · 刘海/灵动岛 = 59，老机型 = 20，iPad = 24，各自不同
-        ///   · hitTest 发生在触摸分发时，此刻视图必已挂进 window，
-        ///     `window?.safeAreaInsets.top` 一定是真值（之前用 keyWindow
-        ///     找错 window 才是「取到 0」的根因）
-        var navBarBottom: CGFloat {
-            return (window?.safeAreaInsets.top ?? 0) + 44
+        /// 上一版（e4b9b58）错在**混用两套坐标系**：
+        ///   · 入参 `point` 是**本视图**坐标（本视图 y=0 在屏幕哪一行，
+        ///     取决于 SwiftUI 把它摆在哪，可能贴着安全区顶，也可能贴屏幕顶）；
+        ///   · `window.safeAreaInsets.top` 是**窗口**坐标里的状态栏高度。
+        /// 两者直接相加没有意义。刘海机上是 `视图坐标 0 + 59 + 44 = 103`：
+        /// 若视图本就从安全区顶起算，等于多挖了 59pt（导航栏下方一大片
+        /// 变成死区）；若某一刻 safeAreaInsets 还没就绪取到 0，又只剩
+        /// 44pt，盖不住 y=59 起的返回键。两种结果交替出现 ——
+        /// 这就是「返回键时灵时不灵」的真正原因。
+        ///
+        /// 现在统一换算：把触点转到**窗口坐标**，再和窗口自己的
+        /// `safeAreaInsets.top + 44`（状态栏 + 导航栏标准高度）比较。
+        /// 同一坐标系内相减，结果不随视图被摆在哪而漂移。
+        func isInNavBar(_ point: CGPoint) -> Bool {
+            guard let win = window else { return false }
+            let inWindow = convert(point, to: win)
+            return inWindow.y < win.safeAreaInsets.top + 44
         }
 
         /// [R56] 导航栏区域直接穿透（返回 nil），把触摸完整交给系统
@@ -521,7 +531,7 @@ private struct EdgePanOverlay: UIViewRepresentable {
         /// 导航栏里的 tap 落到系统返回键、侧滑落到系统返回手势，抽屉
         /// 手势完全不参与。
         override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
-            if point.y < navBarBottom {
+            if isInNavBar(point) {
                 return nil
             }
             return super.hitTest(point, with: event)
@@ -615,9 +625,13 @@ private struct EdgePanOverlay: UIViewRepresentable {
             // 不接管 —— 让系统返回键/返回手势用。边缘手势本来就有
             // point(inside:) 挖洞挡住，兜底手势没那个保护，这里必须
             // 自己判一次，否则手指按在返回键上滑动会误触拉抽屉。
+            //
+            // [R57] 判断统一走 `isInNavBar`（窗口坐标系），和 hitTest 同一口径。
+            // 原来用 `host.navBarBottom` 拿的是视图坐标，和触点同一坐标系，
+            // 但那个值是窗口安全区高度，等于把两套坐标混着用。
             if let host = host {
                 let startY = pan.location(in: host).y - pan.translation(in: host).y
-                if startY < host.navBarBottom { return false }
+                if host.isInNavBar(CGPoint(x: 0, y: startY)) { return false }
             }
 
             if isOpen {
