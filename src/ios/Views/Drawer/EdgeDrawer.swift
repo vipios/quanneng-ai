@@ -61,6 +61,16 @@ final class DrawerState: ObservableObject {
     /// 吸附判定：拖过这个比例就往「展开」吸，否则往「收起」吸。
     static let settleThreshold: CGFloat = 0.4
 
+    /// [R58] 系统导航栏高度。手势层要在垂直方向让出这一段。
+    ///
+    /// 44 是 UINavigationBar 的标准内容高度（不含量状态栏）。
+    /// 手势层的父容器由 ContentView 的 GeometryReader 给出、未 ignoresSafeArea，
+    /// 坐标原点正好在安全区顶部 = 导航栏顶边，所以本地 0…44 就是导航栏。
+    ///
+    /// 刻意不在这里加 `safeAreaInsets.top`：那是窗口坐标里的量，
+    /// 加到视图坐标上就又变成 R56/R57 那种跨坐标系相加的错。
+    static let navBarHeight: CGFloat = 44
+
     var isOpen: Bool { progress > 0.5 }
 
     /// [R42-对齐原版返回手感] 动画参数。
@@ -331,7 +341,30 @@ struct DrawerContainer<Drawer: View, Content: View>: View {
             // 这里是第二次补回，不要再删。
             EdgePanOverlay(state: state, drawerWidth: drawerWidth)
                 .frame(width: DrawerState.edgeSlop)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+                // [R58-返回键·物理避让] 手势层从导航栏下方开始，**不覆盖导航栏**。
+                //
+                // 为什么必须物理避让，而不是继续在 hitTest 里挖洞：
+                // 这层是 ZStack 里的一张透明 UIView，盖在系统导航栏上方。
+                // `hitTest` 返回 nil 想「放行」，但 SwiftUI 的内容不是它的
+                // 兄弟 UIView（是画在同一层 hosting view 里的），nil 没有
+                // 接收者可以回退 —— 触摸被直接丢弃，而不是穿透。
+                // 于是返回键热区（x≈0~50）只剩 x>44 那一小条能点到，
+                // 用户看到的就是「只有一个固定的小点能按」。
+                //
+                // 让出导航栏后，左上角返回键整块热区恢复成系统原样：
+                // 图标四周都能按，和原版一致。代价只是导航栏那 44pt 高的
+                // 左边缘不能再起手拉抽屉 —— 那本来就该让给系统返回手势。
+                //
+                // 数值用视图坐标：本容器由 ContentView 的 GeometryReader
+                // 包着、没有 ignoresSafeArea，坐标原点就在安全区顶部，
+                // 所以导航栏恰好占本地 0…44，不需要再加状态栏高度。
+                //
+                // ⚠️ padding 必须在 `maxHeight: .infinity` **之前**：
+                // 反过来写的话，内层已经撑满父高，padding 再把整体顶高 44，
+                // 超出的部分会被 ZStack 垂直居中，顶部反而多盖回来一截。
+                // 先 padding 后撑满，父级只会给内层分配 (高 − 44)。
+                .padding(.top, DrawerState.navBarHeight)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 // [R42-有键盘也能拉] 忽略键盘安全区。
                 //
                 // 键盘弹起时 SwiftUI 会把安全区底部上移，这个手势层的
