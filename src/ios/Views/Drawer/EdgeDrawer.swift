@@ -430,8 +430,31 @@ private struct EdgePanOverlay: UIViewRepresentable {
         // 不和内容区的滚动手势抢：真正要接管时由 delegate 决定。
         pan.cancelsTouchesInView = false
         v.addGestureRecognizer(pan)
+        context.coordinator.edgePan = pan
 
-        context.coordinator.pan = pan
+        // [R53-边缘滑动不灵敏·兜底手势] 用户原话：「直接滑动就不出来，
+        // 如果是点击左侧边缘然后再滑动，就很好」。
+        //
+        // UIScreenEdgePanGestureRecognizer 只认落点在屏幕物理边缘
+        // ~20pt 内的触摸。手指落点落在 20~44pt（edgeSlop）之间时，
+        // 边缘手势直接不认 —— 这次滑动就丢了。用户拇指自然落点经常
+        // 在这个区间，于是「滑了好几遍才出来」。
+        //
+        // 兜底：加一个普通 UIPanGestureRecognizer，由 shouldBegin 判断
+        //   · 起手点（location - translation）在 edgeSlop 带内
+        //   · 方向往右（拉出）
+        // 两个手势不会重复触发：边缘手势 begin 后，兜底手势的
+        // shouldRecognizeSimultaneouslyWith 返回 false 会自然让位；
+        // 反过来兜底先 begin，边缘手势也会被同样的互斥挡住。
+        let fallback = UIPanGestureRecognizer(
+            target: context.coordinator,
+            action: #selector(Coordinator.handle(_:))
+        )
+        fallback.delegate = context.coordinator
+        fallback.cancelsTouchesInView = false
+        v.addGestureRecognizer(fallback)
+        context.coordinator.fallbackPan = fallback
+
         context.coordinator.host = v
         return v
     }
@@ -477,31 +500,30 @@ private struct EdgePanOverlay: UIViewRepresentable {
         var activeWidth: CGFloat = 0          // >0 表示抽屉开着，整片可接管
         var edgeSlop: CGFloat = DrawerState.edgeSlop
 
-        /// [R52-返回键热区小·真根因] 顶部导航栏高度。
+        /// [R53-返回键彻底放行] 顶部导航栏底界。手势层（全屏铺在最上层）
+        /// 会吃掉落在它命中区里的触摸 —— 系统返回键 ‹ 在左上角，正好在
+        /// 左边缘 edgeSlop 带内，所以必须把「整段导航栏」从手势层命中区
+        /// 挖掉，让返回键的触摸穿透到下面的 NavigationStack。
         ///
-        /// 返回键 ‹ 是系统 NavigationStack 的默认返回键，热区约 44×44，
-        /// 中心在导航栏内（y ≈ 状态栏 + 22）。它在屏幕左边缘 edgeSlop(44)
-        /// 之内 —— 而手势层对左边缘内 `point.x <= edgeSlop` 返回 true 会
-        /// 把点击整个吞掉。所以要靠 `point.y < navBarBottom` 把导航栏
-        /// 区域挖掉，让返回键的触摸穿透下去。
-        ///
-        /// 之前两版挖洞都不够：
-        ///   · R45 用 `safeAreaInsets.top`，桥接 UIView 自身值常为 0，
-        ///     挖出来 44 只盖住状态栏，返回键没挖到 → 完全点不了；
-        ///   · R52 用 `window?.safeAreaInsets.top`，但 SwiftUI 托管的
-        ///     UIView 的 `window` 属性在 hitTest 时经常还是 nil，走兜底
-        ///     59+44=103 差一点点，返回键下半仍在手势层里 → 「要点到
-        ///     图标正上方精确位置才反应」。
-        ///
-        /// 现在改用 UIApplication 的 keyWindow（hitTest 时一定拿得到），
-        /// 并且挖到「导航栏底 + 12pt 余量」= 状态栏 + 56，把返回键的
-        /// 44×44 热区整个盖住。兜底 59+56=115 也足够。
-        private var navBarBottom: CGFloat {
+        /// 取安全区的方式按可靠度降序，最后兜底一个足够大的常数：
+        ///   keyWindow → 自身 window → 固定 103（刘海机导航栏底）。
+        /// 之前多版「挖洞不够」的根因都是取到 0 或偏小，返回键热区
+        /// （44×44，中心在导航栏，实际从 y≈statusBar 延伸到 statusBar+44）
+        /// 的下半段仍落在手势层里。
+        /// [R53] 导航栏底界，Coordinator 判断「起手点是否在导航栏」也要用，
+        /// 所以不是 private。
+        var navBarBottom: CGFloat {
             let keyWindow = UIApplication.shared.connectedScenes
                 .compactMap { $0 as? UIWindowScene }
                 .flatMap(\.windows)
                 .first(where: \.isKeyWindow)
-            let top = keyWindow?.safeAreaInsets.top ?? 59
+            let top = keyWindow?.safeAreaInsets.top
+                ?? window?.safeAreaInsets.top
+                ?? 59
+            // 状态栏 + 导航栏 44 + 返回键热区向下延伸的余量。
+            // 导航栏在 iOS 16-26 都是 44pt（液态玻璃也是），
+            // 返回键 44×44 热区中心在导航栏内，不会伸到导航栏底以下，
+            // 但 +12 余量让「手指按在返回键略偏下」也放行。
             return top + 56
         }
 
@@ -525,7 +547,10 @@ private struct EdgePanOverlay: UIViewRepresentable {
 
         var state: DrawerState
         var width: CGFloat
-        var pan: UIPanGestureRecognizer?
+        /// 屏幕物理边缘手势（零死区，优先）。
+        weak var edgePan: UIScreenEdgePanGestureRecognizer?
+        /// [R53] 兜底普通 pan：接管落点在边缘带内但不在最边缘的滑动。
+        weak var fallbackPan: UIPanGestureRecognizer?
         weak var host: PassthroughView?
 
         private var startProgress: CGFloat = 0
@@ -568,11 +593,15 @@ private struct EdgePanOverlay: UIViewRepresentable {
 
         // MARK: UIGestureRecognizerDelegate
 
-        /// 让这个手势和内容区的手势并存，最终由 `shouldBegin` 决定谁生效。
+        /// [R53] 两个 pan（边缘 + 兜底）互斥：谁先 begin 另一个就让位，
+        /// 避免同一次滑动被识别两次造成进度跳变。和内容区滚动手势也互斥，
+        /// 由 shouldBegin 提前决定谁生效。
         func gestureRecognizer(_ g: UIGestureRecognizer,
                                shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
-            // 只和自己的 pan 并存没意义；和滚动视图的手势要互斥，
-            // 所以这里返回 false，靠 shouldBegin 提前决定。
+            if g === edgePan || g === fallbackPan,
+               other === edgePan || other === fallbackPan {
+                return false
+            }
             return false
         }
 
@@ -580,8 +609,22 @@ private struct EdgePanOverlay: UIViewRepresentable {
         func gestureRecognizerShouldBegin(_ g: UIGestureRecognizer) -> Bool {
             guard let pan = g as? UIPanGestureRecognizer, let view = pan.view else { return false }
 
+            // [R53] 另一个 pan 已经在跟手时，这个不重复接。
+            // （同一次触摸两个手势都会收到 shouldBegin，先 begin 的赢。）
+            if g === edgePan, fallbackPan?.state == .began || fallbackPan?.state == .changed { return false }
+            if g === fallbackPan, edgePan?.state == .began || edgePan?.state == .changed { return false }
+
             let v = pan.velocity(in: view)
             let isOpen = state.progress > 0.02
+
+            // [R53-返回键放行] 起手点在导航栏区域（返回键 ‹ 那一行）时，
+            // 不接管 —— 让系统返回键/返回手势用。边缘手势本来就有
+            // point(inside:) 挖洞挡住，兜底手势没那个保护，这里必须
+            // 自己判一次，否则手指按在返回键上滑动会误触拉抽屉。
+            if let host = host {
+                let startY = pan.location(in: host).y - pan.translation(in: host).y
+                if startY < host.navBarBottom { return false }
+            }
 
             if isOpen {
                 // 抽屉开着：只认「往左拖」（收回去）。
@@ -592,18 +635,17 @@ private struct EdgePanOverlay: UIViewRepresentable {
 
             // 抽屉关着：必须是往右拖。
             //
-            // [R42] 起手位置的判定**不在这里**了。
-            //
-            // 换用 `UIScreenEdgePanGestureRecognizer` 之后，UIKit 在触摸
-            // 按下那一刻就按 `edges = .left` 过滤过了 —— 能走到这个回调
-            // 说明起手点一定在屏幕左边缘，不需要再判断。
-            //
-            // 之前那段 `startX = location.x - translation.x` 的反推是给
-            // 普通 pan 补救用的（它要等手指移动十几点才回调，起手点已经
-            // 被推离边缘）。现在既没必要，也不该留着：它会把「从边缘
-            // 起手、但手指已经往右移了 40pt」这种正在正常拉动的情况
-            // 二次判死。
-            //
+            // [R53] 兜底 pan 要多判一个「起手点在边缘带内」：
+            // 它没有 edges 过滤，全屏都会收到回调。用
+            // `location - translation` 反推起手点（pan 进入 .began 时
+            // translation 还很小，误差可忽略），不在 edgeSlop 带内
+            // 就让给内容区 —— 否则聊天页中间往右滑也会拉开抽屉。
+            if g === fallbackPan {
+                let loc = pan.location(in: view)
+                let startX = loc.x - pan.translation(in: view).x
+                guard startX <= DrawerState.edgeSlop else { return false }
+            }
+
             // 只留方向判定。垂直位移大于水平时让给内容区的滚动 ——
             // 边缘手势理论上不会和纵向滚动冲突，但抽屉里那个会话列表
             // 是纵向的，斜着划时不要抢它是必要的。

@@ -85,17 +85,30 @@ extension ContentView {
         if isSessionHighlighted(session.id) {
             selectedSessionId = nil
         }
-        // [R52-删当前对话残留] iPhone 窄屏：右侧显示的是导航栈顶
-        // （currentStackSessionId），不是 selectedSessionId。原来这里
-        // 只清 selection —— 窄屏删掉当前对话后，抽屉列表空了、右侧
-        // 还挂着被删对话的内容。handleSessionsDeletedElsewhere 早就
-        // 有这段（别处删除的通知通道），本机单删通道漏了，补齐一致。
-        if !isWideLayout, currentStackSessionId == session.id {
-            navigationPath = NavigationPath()
-            currentStackSessionId = nil
-        }
         withAnimation {
             sessions.removeAll { $0.id == session.id }
+        }
+        // [R54-删对话残留·彻底修] iPhone 窄屏：右侧显示的是导航栈顶。
+        // 之前按 id 精确匹配（currentStackSessionId == session.id）漏了
+        // 多种场景：栈里是 draft id 而列表行是真实 id、栈顶早被换过、
+        // currentStackSessionId 与栈不同步…… 反正判断本质很简单：
+        //
+        //   「栈顶指向的会话已经不在列表里」 = 必然是残留，清栈。
+        //
+        // 不再纠结 id 对不对得上。栈空（本来就在列表页）就不动。
+        if !isWideLayout, !navigationPath.isEmpty {
+            let topId = currentStackSessionId
+            let topStillExists = topId.map { id in
+                sessions.contains { $0.id == id }
+                    || (Self.isNewSessionId(id) && newSessionRealId == id)
+            } ?? false
+            if !topStillExists {
+                navigationPath = NavigationPath()
+                currentStackSessionId = nil
+                // draft 跟踪也要清：栈顶就是那个被删的 draft。
+                activeDraftId = nil
+                newSessionRealId = nil
+            }
         }
         Task { @MainActor in
             await Self.tearDownForDeletion([session.id])
@@ -110,11 +123,22 @@ extension ContentView {
             if ids.contains(where: { isSessionHighlighted($0) }) {
                 selectedSessionId = nil
             }
-            if !isWideLayout, let current = currentStackSessionId, ids.contains(current) {
-                navigationPath = NavigationPath()
-                currentStackSessionId = nil
-            }
             sessions.removeAll { ids.contains($0.id) }
+            // [R54-删对话残留·彻底修] 与 deleteSession 同一套判断：
+            // 栈顶指向的会话已不在列表里 = 残留，清栈。
+            if !isWideLayout, !navigationPath.isEmpty {
+                let topId = currentStackSessionId
+                let topStillExists = topId.map { id in
+                    sessions.contains { $0.id == id }
+                        || (Self.isNewSessionId(id) && newSessionRealId == id)
+                } ?? false
+                if !topStillExists {
+                    navigationPath = NavigationPath()
+                    currentStackSessionId = nil
+                    activeDraftId = nil
+                    newSessionRealId = nil
+                }
+            }
             refreshSessionList()
         }
     }
@@ -146,14 +170,23 @@ extension ContentView {
         if ids.contains(where: { isSessionHighlighted($0) }) {
             selectedSessionId = nil
         }
-        // [R52-删当前对话残留] 与 deleteSession 相同：窄屏栈顶被删时
-        // 清导航栈，否则右侧还挂着被删对话的内容。
-        if !isWideLayout, let current = currentStackSessionId, ids.contains(current) {
-            navigationPath = NavigationPath()
-            currentStackSessionId = nil
-        }
         withAnimation {
             sessions.removeAll { ids.contains($0.id) }
+        }
+        // [R54-删对话残留·彻底修] 与 deleteSession 同一套判断：
+        // 栈顶指向的会话已不在列表里 = 残留，清栈。
+        if !isWideLayout, !navigationPath.isEmpty {
+            let topId = currentStackSessionId
+            let topStillExists = topId.map { id in
+                sessions.contains { $0.id == id }
+                    || (Self.isNewSessionId(id) && newSessionRealId == id)
+            } ?? false
+            if !topStillExists {
+                navigationPath = NavigationPath()
+                currentStackSessionId = nil
+                activeDraftId = nil
+                newSessionRealId = nil
+            }
         }
         // Clear deleteInfo to signal onDismiss that deletion occurred;
         // isSelecting and selectedIds are reset in sheet's onDismiss to avoid animation conflicts.

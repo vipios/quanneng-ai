@@ -540,6 +540,10 @@ struct SessionDrawer: View {
                 HStack(spacing: 6) {
                     Image(systemName: "plus")
                         .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .frame(width: 26, height: 26)
+                        .background(Color.white.opacity(0.22),
+                                    in: RoundedRectangle(cornerRadius: 6, style: .continuous))
                     Text("新建任务")
                         .font(.system(size: 13, weight: .semibold))
                     Spacer(minLength: 0)
