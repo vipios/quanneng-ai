@@ -295,7 +295,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: deps/resources/alpine-rootfs.zip
-          key: rootfs-alpine-v2
+          key: rootfs-alpine-v3-toolchain
       
       # ── 4. 构建原生依赖 ──
       # 顺序有依赖关系，不能并行也不能调换：
@@ -408,7 +408,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: deps/resources/alpine-rootfs.zip
-          key: rootfs-alpine-v2
+          key: rootfs-alpine-v3-toolchain
 
       - name: Build rclone
         if: steps.c_rclone.outputs.cache-hit != 'true'

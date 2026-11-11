@@ -723,10 +723,90 @@ class RootfsManager {
             if entry.isDirectory {
                 try fileManager.createDirectory(at: entryPath, withIntermediateDirectories: true)
             } else {
-                if let data = try archive.extractData(for: entry) {
-                    try data.write(to: entryPath)
-                }
+                // [R58-大文件流式解压] 预装工具链后 rootfs 里有单个 132MB 的
+                // libLLVM.so.18.1，而这里原来是「整个文件读进内存再写盘」。
+                // 132MB 的 Data + 132MB 的解压目标缓冲同时驻留，在手机上是
+                // 直接把自己送进 jetsam 的量级 —— 解压途中被系统杀掉，
+                // rootfs 处于半装状态，arch tag 又没写，下次启动重来一遍。
+                //
+                // 改成按块解压：内存里同时只有一块，文件多大都不影响峰值。
+                try extractEntryStreaming(entry, from: archive, to: entryPath)
             }
+        }
+    }
+
+    /// 把一个 zip entry 流式解压到磁盘。
+    ///
+    /// 与 `ZIPArchive.extractData(for:)` 的区别只在这里不构造完整 Data：
+    ///   · 未压缩（method 0）—— 直接把压缩流当原文按块抄写；
+    ///   · deflate（method 8）—— 用 `compression_stream` 一块一块解。
+    ///
+    /// 为什么不用 `compression_decode_buffer`（原来那个）：
+    /// 它要求目标缓冲一次性开到 `expectedSize` 那么大，等于又把整个文件
+    /// 摆回了内存里。`compression_stream` 是增量的，块大小我们自己定。
+    private func extractEntryStreaming(_ entry: Entry,
+                                       from archive: ZIPArchive,
+                                       to destination: URL) throws {
+        let fm = FileManager.default
+
+        // 先确保文件存在（上一步建目录时不会建文件），再拿写句柄。
+        // 分两步是因为 `FileHandle(forWritingAtPath:)` 不创建文件。
+        if !fm.fileExists(atPath: destination.path) {
+            fm.createFile(atPath: destination.path, contents: nil)
+        }
+        guard let out = FileHandle(forWritingAtPath: destination.path) else {
+            throw NSError(domain: "RootfsManager", code: 3, userInfo: [
+                NSLocalizedDescriptionKey: "创建文件失败：\(destination.lastPathComponent)"
+            ])
+        }
+
+        // 写入失败时要删掉半截文件再抛错。
+        // 不删的话 rootfs 里会留一个大小不对的 .so / 可执行文件 ——
+        // 那种文件不报错、只是运行时段错误，比直接失败难查得多。
+        do {
+            try archive.streamEntry(entry) { chunk in
+                try out.write(contentsOf: chunk)
+            }
+        } catch {
+            try? out.close()
+            try? fm.removeItem(at: destination)
+            throw error
+        }
+        try? out.close()
+
+        // 权限放在关闭之后设：文件句柄还开着时改权限，
+        // 某些文件系统上会被随后的 flush 覆盖回去。
+        if (entry.unixMode & 0o111) != 0 {
+            try? fm.setAttributes([.posixPermissions: entry.unixMode & 0o777],
+                                  ofItemAtPath: destination.path)
+        }
+    }
+}
+
+// [R58-大文件流式解压] 流式解压过程中的错误。
+//
+// 单独定义而不是复用 NSError：这些错误的文案会直接进日志，
+// 带上具体的方法号 / 状态码，下次真出问题时能一眼看出是哪一步。
+private enum ZIPStreamError: LocalizedError {
+    /// 本地文件头长度不足 —— zip 文件被截断或不是 zip
+    case badHeader
+    /// 压缩方法不是 stored(0) 也不是 deflate(8)
+    case unsupportedMethod(UInt16)
+    /// compression_stream_init 失败
+    case streamInit(Int32)
+    /// compression_stream_process 返回了错误
+    case decodeFailed(Int32)
+
+    var errorDescription: String? {
+        switch self {
+        case .badHeader:
+            return "zip 本地文件头损坏"
+        case .unsupportedMethod(let m):
+            return "不支持的压缩方法 \(m)"
+        case .streamInit(let s):
+            return "解压流初始化失败（status=\(s)）"
+        case .decodeFailed(let s):
+            return "解压失败（status=\(s)）"
         }
     }
 }
@@ -746,6 +826,13 @@ private class ZIPArchive {
         let uncompressedSize: Int
         let compressionMethod: UInt16
         let localHeaderOffset: UInt64
+        /// [R58-大文件流式解压] zip 里记录的文件模式位。
+        ///
+        /// 预装工具链后 rootfs 里带 `bin/ldid`、`bin/clang` 这些可执行文件，
+        /// 靠它还原执行位。取 external attributes 的高 16 位 —— 这是 zip 的
+        /// UNIX 扩展约定（低 16 位是 DOS 属性，那边没有权限概念）。
+        /// 拿不到时按 0644 处理，宁可少个执行位也不要造出 0777。
+        var unixMode: Int = 0o644
     }
 
     private let fileHandle: FileHandle
@@ -835,6 +922,15 @@ private class ZIPArchive {
         let commentLength = readUInt16(headerData, at: 32)
         let localHeaderOffset = readUInt32(headerData, at: 42)
 
+        // [R58-大文件流式解压] external attributes 在偏移 38，高 16 位是
+        // UNIX 模式位（含文件类型 + 权限）。同一条记录里低 16 位是 DOS 属性，
+        // 那边没有权限概念，所以只取高 16 位。
+        // 数据全为 0（部分打包器不写）时退回 0644，不当成 0000 ——
+        // 0000 会让文件谁都读不了，等于把 rootfs 弄坏。
+        let externalAttrs = readUInt32(headerData, at: 38)
+        let rawMode = Int((externalAttrs >> 16) & 0xFFFF)
+        let unixMode = (rawMode & 0o777) == 0 ? Int(0o644) : (rawMode & 0o777)
+
         let fileNameData = fileHandle.readData(ofLength: Int(fileNameLength))
         let fileName = String(data: fileNameData, encoding: .utf8) ?? ""
 
@@ -846,8 +942,128 @@ private class ZIPArchive {
             compressedSize: Int(compressedSize),
             uncompressedSize: Int(uncompressedSize),
             compressionMethod: compressionMethod,
-            localHeaderOffset: UInt64(localHeaderOffset)
+            localHeaderOffset: UInt64(localHeaderOffset),
+            unixMode: unixMode
         )
+    }
+
+    /// [R58-大文件流式解压] 按块把 entry 的内容喂给调用方。
+    ///
+    /// 这是 `extractData(for:)` 的增量版本，用来替代「整个文件进内存」。
+    /// 之所以单独写一个而不是改 `extractData`：后者还有别的调用点
+    /// （读 meta.db 这类小文件），改成流式会让那些地方变复杂。
+    ///
+    /// 分两条路：
+    ///   · method 0（stored）—— zip 里存的就是原文，直接按块抄；
+    ///   · method 8（deflate）—— `compression_stream` 增量解，
+    ///     输出块大小固定 256KB，峰值内存与文件大小无关。
+    func streamEntry(_ entry: Entry, sink: (Data) throws -> Void) throws {
+        fileHandle.seek(toFileOffset: entry.localHeaderOffset)
+
+        let localHeader = fileHandle.readData(ofLength: 30)
+        guard localHeader.count == 30 else { throw ZIPStreamError.badHeader }
+
+        let fileNameLen = readUInt16(localHeader, at: 26)
+        let extraLen = readUInt16(localHeader, at: 28)
+        fileHandle.seek(toFileOffset: fileHandle.offsetInFile + UInt64(fileNameLen + extraLen))
+
+        var remaining = entry.compressedSize
+        let readChunk = 256 * 1024
+
+        // 未压缩：原样搬运
+        if entry.compressionMethod == 0 {
+            while remaining > 0 {
+                let n = min(readChunk, remaining)
+                let data = fileHandle.readData(ofLength: n)
+                if data.isEmpty { break }
+                remaining -= data.count
+                try sink(data)
+            }
+            return
+        }
+
+        guard entry.compressionMethod == 8 else {
+            throw ZIPStreamError.unsupportedMethod(entry.compressionMethod)
+        }
+
+        // deflate：增量解压
+        //
+        // 用 compression_stream 而不是 compression_decode_buffer：
+        // 后者要求目标缓冲一次性开到「整个文件解压后」那么大（132MB），
+        // 等于把整个文件又摆回内存里，这次改造就白做了。
+        //
+        // 结构体字段在 Swift 里是非 optional 的指针类型，不能写 nil，
+        // 所以先分配一个 1 字节的占位再 init —— init 只写这四个字段，
+        // 不读它们，占位在第一次 process 前就会被真正赋值覆盖。
+        var placeholder = UnsafeMutablePointer<UInt8>.allocate(capacity: 1)
+        defer { placeholder.deallocate() }
+
+        var stream = compression_stream(
+            dst_ptr: placeholder,
+            dst_size: 0,
+            src_ptr: UnsafePointer(placeholder),
+            src_size: 0,
+            state: nil
+        )
+        let initStatus = compression_stream_init(&stream, COMPRESSION_STREAM_DECODE, COMPRESSION_ZLIB)
+        guard initStatus == COMPRESSION_STATUS_OK else {
+            throw ZIPStreamError.streamInit(initStatus.rawValue)
+        }
+        defer { compression_stream_destroy(&stream) }
+
+        let dstBuffer = UnsafeMutablePointer<UInt8>.allocate(capacity: readChunk)
+        defer { dstBuffer.deallocate() }
+
+        // 错误用这个变量带出闭包 —— 不能在 withUnsafeBytes 里直接 throw，
+        // 那样会把「已经产出到一半的文件」留在磁盘上却当成成功。
+        var streamError: Error?
+        var finished = false
+
+        while remaining > 0 && !finished {
+            let n = min(readChunk, remaining)
+            let compressed = fileHandle.readData(ofLength: n)
+            if compressed.isEmpty { break }
+            remaining -= compressed.count
+
+            compressed.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
+                guard let base = raw.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return }
+                stream.src_ptr = base
+                stream.src_size = compressed.count
+
+                // 一块输入可能产出多块输出，循环到这块被吃干净为止
+                while true {
+                    stream.dst_ptr = dstBuffer
+                    stream.dst_size = readChunk
+                    let status = compression_stream_process(&stream, 0)
+
+                    switch status {
+                    case COMPRESSION_STATUS_OK, COMPRESSION_STATUS_END:
+                        let produced = readChunk - stream.dst_size
+                        if produced > 0 {
+                            do {
+                                try sink(Data(bytes: dstBuffer, count: produced))
+                            } catch {
+                                streamError = error
+                                return
+                            }
+                        }
+                        if status == COMPRESSION_STATUS_END {
+                            finished = true
+                            return
+                        }
+                        // OK 且这块输入已经用尽 → 去读下一块
+                        if stream.src_size == 0 { return }
+                    default:
+                        streamError = ZIPStreamError.decodeFailed(status.rawValue)
+                        return
+                    }
+                }
+            }
+
+            if streamError != nil { break }
+        }
+
+        if let e = streamError { throw e }
     }
 
     func extractData(for entry: Entry) throws -> Data? {

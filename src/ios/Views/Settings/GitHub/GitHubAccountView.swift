@@ -375,11 +375,57 @@ struct GitHubAccountView: View {
     }
 
     // MARK: - 二、权限
+    //
+    // [R58-权限如实展示] 用户原话：「这个界面令牌开通什么权限就要展示什么权限」。
+    //
+    // 原来是写死两行（repo / workflow），令牌里还有什么都看不见 ——
+    // 用户没法核对「我在 GitHub 上到底给这个 App 开了多大的门」。
+    // 现在改成：令牌里有什么 scope 就列什么，一项不漏。
+    //
+    // 三项设计决定：
+    //   1. 本 App 会用的（repo / workflow / read:user）排在前面，其余排在后面，
+    //      并用「本 App 未使用」标出来 —— 让用户分得清哪些是必须的，
+    //      哪些是他自己顺手勾的。
+    //   2. 危险权限（删仓库、改组织、加 SSH 公钥…）单独标红并解释，
+    //      不因为是「他自己勾的」就不提。
+    //   3. 读不到 scope 时（细粒度令牌），**不显示任何一行**，
+    //      只给一句说明。绝不能把「读不到」画成「一个权限都没有」。
 
     private var scopeSection: some View {
         Section {
-            scopeRow("推代码到仓库", scope: "repo", ok: store.account?.canPushCode ?? false)
-            scopeRow("触发 Actions 编译", scope: "workflow", ok: store.account?.canTriggerWorkflow ?? false)
+            let unknown = store.account?.scopeUnknown == true
+            let granted = store.account?.grantedScopes ?? []
+            let missing = store.account?.missingRequiredScopes ?? []
+
+            if unknown {
+                // 细粒度令牌：GitHub 不在响应头里回 scopes，
+                // 本地无从得知。这时画任何一行都是编的。
+                HStack(spacing: 10) {
+                    Image(systemName: "questionmark.circle.fill")
+                        .foregroundColor(.secondary)
+                    Text("读不到这枚令牌的权限清单")
+                        .foregroundColor(.secondary)
+                }
+            } else if granted.isEmpty {
+                // 真的一项都没有：罕见但可能（只读 public 信息的令牌）
+                HStack(spacing: 10) {
+                    Image(systemName: "circle.dashed")
+                        .foregroundColor(.orange)
+                    Text("这枚令牌没有任何权限")
+                    Spacer()
+                    Text("0 项")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            } else {
+                // 缺必需权限时，先把缺的摆在最上面 —— 那是用户要动手修的东西
+                ForEach(missing) { s in
+                    scopeRow(s, state: .missing)
+                }
+                ForEach(granted) { s in
+                    scopeRow(s, state: .granted)
+                }
+            }
 
             Button {
                 Task {
@@ -408,37 +454,81 @@ struct GitHubAccountView: View {
                 }
             }
         } header: {
-            Text("权限")
-        } footer: {
-            // [R40-密令登录] 权限读不到时不能显示成「缺 repo、workflow」。
-            // 细粒度令牌本来就不在响应头里回 scopes，照旧文案会让人
-            // 以为自己建错了令牌、跑去重建一个 —— 那是最浪费时间的误导。
-            if store.account?.scopeUnknown == true {
-                Text("这枚密令读不到权限范围（细粒度令牌就是这样）。能推不能推，等第一次推送时 GitHub 的回答为准 —— 被拒的话它会明确说缺哪一项。")
-            } else if let missing = store.account?.missingScopes, !missing.isEmpty {
-                Text("缺 \(missing.joined(separator: "、"))。少了这两项，推代码或触发编译会被 GitHub 拒绝。")
-                    .foregroundColor(.orange)
-            } else {
-                Text("这两项是云端编译必须的。其它权限（删仓库、管理组织）故意没有申请。")
+            // 头部带数量，用户一眼知道这枚令牌一共开了几项
+            HStack {
+                Text("权限")
+                Spacer()
+                if store.account?.scopeUnknown != true {
+                    let n = store.account?.grantedScopes.count ?? 0
+                    Text("\(n) 项")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
             }
+        } footer: {
+            scopeFooter
         }
     }
 
-    private func scopeRow(_ title: String, scope: String, ok: Bool) -> some View {
-        // 权限未知 → 画成「问号」，不是「没勾」。
-        // 三态而不是两态：勾了 / 没勾 / 不知道，本来就是三件事。
-        let unknown = store.account?.scopeUnknown == true
-        return HStack {
-            Image(systemName: unknown ? "questionmark.circle.fill"
-                                      : (ok ? "checkmark.circle.fill" : "circle.dashed"))
-                .foregroundColor(unknown ? .secondary : (ok ? .green : .orange))
-            Text(title)
-            Spacer()
-            Text(scope)
+    /// 权限区的脚注。四种情况各说各的话，不给一句通用废话。
+    @ViewBuilder
+    private var scopeFooter: some View {
+        if store.account?.scopeUnknown == true {
+            Text("这枚密令读不到权限范围（细粒度令牌就是这样）。能干什么不能干什么，以第一次实际操作时 GitHub 的回答为准 —— 被拒时它会明确说缺哪一项。")
+        } else if let missing = store.account?.missingRequiredScopes, !missing.isEmpty {
+            Text("缺：\(missing.map(\.title).joined(separator: "、"))。少了这些，推代码或触发编译会被 GitHub 拒绝。去 GitHub 重建一枚令牌、勾上对应项再来登录。")
+                .foregroundColor(.orange)
+        } else if let sens = store.account?.grantedScopes.filter(\.isSensitive), !sens.isEmpty {
+            // 有危险权限就点名说 —— 这是用户可能不知道自己在哪勾的
+            Text("其中有 \(sens.count) 项超出本 App 的用途（\(sens.map(\.title).joined(separator: "、"))）。这些是本 App 用不到的权限，如果不想给，去 GitHub 重建令牌时不要勾。")
+                .foregroundColor(.orange)
+        } else {
+            Text("云端编译只需要「读写代码仓库」和「管理 Actions 工作流」两项。上面列出的就是这枚令牌的实际权限，没有隐藏项。")
+        }
+    }
+
+    /// 权限状态。三态：有、缺、不该有（危险）。
+    private enum ScopeState {
+        case granted
+        case missing
+    }
+
+    private func scopeRow(_ s: GitHubScopeInfo, state: ScopeState) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: state == .missing ? "circle.dashed" : "checkmark.circle.fill")
+                .foregroundColor(state == .missing ? .orange : .green)
+                .padding(.top, 1)
+
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    Text(s.title)
+                    // 本 App 用不到的权限：加个灰标，免得用户以为是必需的
+                    if state == .granted && !s.usedByApp {
+                        Text("本 App 未使用")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(Color(.tertiarySystemFill))
+                            .clipShape(Capsule())
+                    }
+                }
+                // 危险权限单独说一句为什么危险
+                if state == .granted && s.isSensitive {
+                    Text(s.detail)
+                        .font(.caption2)
+                        .foregroundColor(.orange)
+                }
+            }
+
+            Spacer(minLength: 8)
+
+            Text(s.scope)
                 .font(.caption)
                 .monospaced()
                 .foregroundColor(.secondary)
         }
+        .padding(.vertical, 1)
     }
 
     // MARK: - 三、仓库配置
