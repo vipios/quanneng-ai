@@ -874,7 +874,7 @@ struct AIChatView: View {
                 NavigationStack {
                     FileBrowserView(
                         rootPath: AIChatViewModel.minisWorkspacePersistentDir(for: sid),
-                        rootLabel: "/var/minis/workspace",
+                        rootLabel: "/var/ai/workspace",
                         highlightFileName: target.filename
                     )
                 }
@@ -1101,7 +1101,7 @@ struct AIChatView: View {
         .sheet(isPresented: $showFileBrowser) {
             NavigationStack {
                 let base = RootfsManager.shared.dataPath
-                FileBrowserView(rootPath: base, initialPath: base.appendingPathComponent("var/minis"), rootLabel: "/")
+                FileBrowserView(rootPath: base, initialPath: base.appendingPathComponent("var/ai"), rootLabel: "/")
             }
         }
         .sheet(isPresented: $showBrowserSheet) {

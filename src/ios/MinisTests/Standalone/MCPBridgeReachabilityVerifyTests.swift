@@ -45,7 +45,7 @@ func source(_ rel: String) -> String {
 let fm = FileManager.default
 let tmp = fm.temporaryDirectory.appendingPathComponent("mcp-bridge-\(UUID().uuidString)")
 let persistent = tmp.appendingPathComponent("AppGroup/MinisConfig/mcp-servers", isDirectory: true)
-let guestLink = tmp.appendingPathComponent("fakefs/data/var/minis/mcp-servers", isDirectory: true)
+let guestLink = tmp.appendingPathComponent("fakefs/data/var/ai/mcp-servers", isDirectory: true)
 try! fm.createDirectory(at: persistent, withIntermediateDirectories: true)
 try! fm.createDirectory(at: guestLink.deletingLastPathComponent(), withIntermediateDirectories: true)
 defer { try? fm.removeItem(at: tmp) }

@@ -397,7 +397,7 @@ struct MinisApp: App {
                     StreamingHangLogger.shared.acquire(reason: "app-launch always-on")
                     // [T-ios-backup-shared-leak] One-shot migration: an earlier
                     // build delivered backup packages into shared/Backups/,
-                    // which is bind-mounted into the guest at /var/minis/shared
+                    // which is bind-mounted into the guest at /var/ai/shared
                     // and is itself the Shared Files backup category. Move any
                     // leftovers out of the agent-visible workspace.
                     BackupDelivery.migrateLegacySharedBackups()
@@ -465,7 +465,7 @@ struct MinisApp: App {
                     // Activate security scopes for user-mounted external folders
                     // (e.g. Obsidian vault in iCloud Drive). Held for app lifetime.
                     MountedFoldersManager.shared.activateAll()
-                    // Create /var/minis/mounts/<name> symlinks in the fakefs now
+                    // Create /var/ai/mounts/<name> symlinks in the fakefs now
                     // that the rootfs exists and mounts are active.
                     AIChatViewModel.refreshMountedFolderSymlinks()
                     // Start iCloud sync engine. v2 takes precedence when its

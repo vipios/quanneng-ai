@@ -177,6 +177,10 @@ class RootfsManager {
             // 的 /etc/profile 里还是旧提示符 \u@minis。这里幂等修补：
             // 检测到旧值就替换成 quanNengAI，成本是一次几 KB 的文件读写。
             patchProfilePromptIfNeeded()
+            // [R56-var/ai 迁移] 老版本把共享目录建在 /var/minis，改名
+            // /var/ai 后要把它搬过去，否则老用户的 workspace/attachments/
+            // skills 等真实数据会「消失」。幂等：/var/ai 已存在就不动。
+            migrateVarMinisToVarAiIfNeeded()
             logger.info("[Rootfs] already installed (\(currentArch)) at \(rootfsPath.path)")
             return
         }
@@ -204,8 +208,8 @@ class RootfsManager {
         // Write architecture tag so we detect mismatches on future launches
         try currentArch.write(to: archTagPath, atomically: true, encoding: .utf8)
 
-        // Pre-create /var/minis/ shared directory structure
-        let minisSubdirs = ["var/minis/attachments", "var/minis/offloads", "var/minis/workspace", "var/minis/skills", "var/minis/shared"]
+        // Pre-create /var/ai/ shared directory structure
+        let minisSubdirs = ["var/ai/attachments", "var/ai/offloads", "var/ai/workspace", "var/ai/skills", "var/ai/shared"]
         for subdir in minisSubdirs {
             let dirPath = dataPath.appendingPathComponent(subdir)
             try? FileManager.default.createDirectory(at: dirPath, withIntermediateDirectories: true)
@@ -215,6 +219,56 @@ class RootfsManager {
         UserDefaults.standard.set(true, forKey: "rootfs.freshInstall")
 
         logger.info("[Rootfs] installation complete (\(currentArch)) at \(rootfsPath.path)")
+    }
+
+    /// [R56-var/ai 迁移] 把旧版根文件系统里的 /var/minis 目录搬到 /var/ai。
+    ///
+    /// 改名 /var/minis → /var/ai 后，老用户 rootfs 里已有的真实数据
+    /// （workspace 里的工作文件、attachments 附件、skills 技能、
+    /// offloads 输出等）还在旧路径下，挂载逻辑改去 /var/ai 就找不到了。
+    /// 这里做一次启动时迁移：
+    ///   · /var/ai 已存在 → 什么都不做（已经迁过 / 新装）
+    ///   · /var/minis 不存在 → 什么都不做（全新安装，无旧数据）
+    ///   · 两者都在 → 把 /var/minis 整体搬到 /var/ai（rename，原子且快）
+    ///
+    /// 注意：这里的路径是 fakefs 数据目录（data/var/minis、data/var/ai），
+    /// 不是 Linux 里的 /var/minis 挂载点。bind-mount 的符号链接会由
+    /// ISHExecutionCoordinator.performMount 在下次挂载时按新路径重建。
+    private func migrateVarMinisToVarAiIfNeeded() {
+        let fm = FileManager.default
+        let oldDir = dataPath.appendingPathComponent("var/minis", isDirectory: true)
+        let newDir = dataPath.appendingPathComponent("var/ai", isDirectory: true)
+
+        // 新路径已存在 → 已迁过，跳过
+        if fm.fileExists(atPath: newDir.path) {
+            return
+        }
+        // 旧路径不存在 → 无旧数据，跳过
+        guard fm.fileExists(atPath: oldDir.path) else {
+            return
+        }
+        do {
+            try fm.moveItem(at: oldDir, to: newDir)
+            logger.info("[Rootfs][R56] 迁移完成 /var/minis → /var/ai")
+        } catch {
+            // move 失败（跨卷/权限）就退化成逐个拷贝，不丢数据。
+            logger.warning("[Rootfs][R56] move 失败，退化为拷贝: \(error.localizedDescription)")
+            do {
+                try fm.createDirectory(at: newDir, withIntermediateDirectories: true)
+                if let en = fm.enumerator(at: oldDir, includingPropertiesForKeys: nil) {
+                    while let src = en.nextObject() as? URL {
+                        let rel = src.path.replacingOccurrences(of: oldDir.path, with: "")
+                        guard !rel.isEmpty else { continue }
+                        let dst = newDir.appendingPathComponent(rel)
+                        if !fm.fileExists(atPath: dst.path) {
+                            try? fm.createDirectory(at: dst.deletingLastPathComponent(), withIntermediateDirectories: true)
+                            try? fm.copyItem(at: src, to: dst)
+                        }
+                    }
+                }
+                logger.info("[Rootfs][R56] 拷贝迁移完成 /var/minis → /var/ai")
+            }
+        }
     }
 
     /// [R53-终端提示符改名] 把已安装 rootfs 里 /etc/profile 的旧提示符

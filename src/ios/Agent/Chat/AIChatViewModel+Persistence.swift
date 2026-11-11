@@ -294,7 +294,7 @@ extension AIChatViewModel {
         sessionCacheWriteTokens = 0
         guard !rawMessages.isEmpty else {
             logger.info("[SessionLoad] \(sessionId) — empty session, DB query took \(String(format: "%.1f", dbElapsed))ms")
-            // Still mount minis even for empty sessions so /var/minis works in terminal
+            // Still mount minis even for empty sessions so /var/ai works in terminal
             logger.info("🔍MOUNT loadSession empty-session fallback, still mounting for \(sessionId)")
             mountMinis(for: sessionId)
             return

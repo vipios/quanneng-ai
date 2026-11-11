@@ -10,7 +10,7 @@ import Foundation
 // 「请求发出时开关是开的」就照推代码到人家的仓库。
 //
 // 另外这层还负责一件前两道管不了的事：**把模型的意图翻成仓库里真实的字节**。
-// 模型给的是沙箱内的绝对路径（/var/minis/workspace/foo.c），
+// 模型给的是沙箱内的绝对路径（/var/ai/workspace/foo.c），
 // GitHub 需要的是仓库内相对路径 + 内容。中间要做读取、大小检查、二进制判定。
 //
 // 参数给错时的报错都写成「你能照着改」的形式 —— 工具出错后模型会读这段字
@@ -65,7 +65,7 @@ enum GitHubCloudBuildTool {
         // ── 参数 ──────────────────────────────────────────────
         guard let filesRaw = args["files"] as? String, !filesRaw.isEmpty else {
             return ("Error: 缺 files 参数。要传一个 JSON 数组，每项形如 "
-                    + #"{"path":"src/main.c","source":"/var/minis/workspace/main.c"}"# + "。", false)
+                    + #"{"path":"src/main.c","source":"/var/ai/workspace/main.c"}"# + "。", false)
         }
         guard let reason = (args["reason"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
               !reason.isEmpty else {
@@ -186,7 +186,7 @@ enum GitHubCloudBuildTool {
 
     // MARK: - 读沙箱文件
     //
-    // `/var/minis/...` 是 **iSH 内部**的路径。App 进程直接拿这个字符串去
+    // `/var/ai/...` 是 **iSH 内部**的路径。App 进程直接拿这个字符串去
     // FileManager 是读不到的 —— 那几个目录是 iSH rootfs 里的挂载点。
     // 必须先经 RootfsManager 映射成宿主路径。
     //
@@ -208,7 +208,7 @@ enum GitHubCloudBuildTool {
     /// 解析 files 参数。
     ///
     /// 接受两种写法，因为模型两种都可能给：
-    ///   [{"path":"a.c","source":"/var/minis/workspace/a.c"}]        ← 推荐
+    ///   [{"path":"a.c","source":"/var/ai/workspace/a.c"}]        ← 推荐
     ///   [{"path":"a.c","content":"..."}]                            ← 小文件直接内联
     ///
     /// 只收 path + source 的话，模型有时会把整个文件内容塞进 source 字段；
@@ -218,7 +218,7 @@ enum GitHubCloudBuildTool {
               let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]
         else {
             throw BuildArgError(message: "files 不是合法的 JSON 数组。要形如 "
-                                + #"[{"path":"src/main.c","source":"/var/minis/workspace/main.c"}]"#)
+                                + #"[{"path":"src/main.c","source":"/var/ai/workspace/main.c"}]"#)
         }
         guard !arr.isEmpty else {
             throw BuildArgError(message: "files 是空数组，没有东西可推。")

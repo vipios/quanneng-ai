@@ -67,7 +67,7 @@ struct RetryRunIntent: AppIntent {
         // intent (`openAppWhenRun = false`) never builds — so on a cold or
         // force-quit launch nothing acquired the security scopes, `activeURLs`
         // stayed empty, and the external-mount snapshot the agent reads was
-        // empty too. `/var/minis/mounts/<name>` was simply absent until the user
+        // empty too. `/var/ai/mounts/<name>` was simply absent until the user
         // opened the app once.
         //
         // Bounded so a slow FileProvider cannot stall the Shortcut: on expiry the

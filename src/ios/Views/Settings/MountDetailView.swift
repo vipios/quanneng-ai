@@ -222,7 +222,7 @@ struct MountDetailView: View {
         } header: {
             Text("Name")
         } footer: {
-            Text("Becomes the folder name under /var/minis/mounts/")
+            Text("Becomes the folder name under /var/ai/mounts/")
         }
     }
 

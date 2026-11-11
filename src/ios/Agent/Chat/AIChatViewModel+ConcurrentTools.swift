@@ -636,7 +636,7 @@ extension AIChatViewModel {
             }
             toolSuccess = result.exitCode == 0
 
-            // Scan for new/modified files under /var/minis/
+            // Scan for new/modified files under /var/ai/
             let postSnapshot = snapshotMinisFiles()
             let newOrModified = postSnapshot.filter { key, date in
                 preSnapshot[key] == nil || preSnapshot[key]! < date
@@ -808,7 +808,7 @@ extension AIChatViewModel {
                     downloadReport = BrowserDownloadCenter.shared.agentReport(for: sid)
                         ?? "[browser_downloads] This action triggered a native browser file "
                          + "download that is still starting (filename not yet resolved). It will "
-                         + "be saved into /var/minis/workspace/ — do NOT re-download it with "
+                         + "be saved into /var/ai/workspace/ — do NOT re-download it with "
                          + "curl/wget; check the workspace or the next browser_use result instead."
                 }
                 if let downloadReport {
@@ -837,12 +837,12 @@ extension AIChatViewModel {
                 let resizedW = inference.resizedW
                 let resizedH = inference.resizedH
 
-                if pathArg.hasPrefix("/var/minis/") {
+                if pathArg.hasPrefix("/var/ai/") {
                     toolImageLinuxPath = pathArg
                 } else if pathArg.hasPrefix("minis://") {
                     let tail = String(pathArg.dropFirst("minis://".count))
                     if !tail.isEmpty {
-                        toolImageLinuxPath = "/var/minis/\(tail)"
+                        toolImageLinuxPath = "/var/ai/\(tail)"
                     }
                 }
 
@@ -1426,7 +1426,7 @@ extension AIChatViewModel {
     /// nothing exists there.
     nonisolated static func readImageFailureText(pathArg: String, resolved: Bool, fileSize: Int?) -> String {
         guard resolved else {
-            return "Error: '\(pathArg)' is not a readable Minis path. Use a path under /var/minis/ (e.g. /var/minis/workspace/chart.png) or a minis:// URL."
+            return "Error: '\(pathArg)' is not a readable Minis path. Use a path under /var/ai/ (e.g. /var/ai/workspace/chart.png) or a minis:// URL."
         }
         guard let size = fileSize else {
             return "Error: No file at '\(pathArg)'. If a command in this same turn creates it, read it in the next turn after that command has finished."
