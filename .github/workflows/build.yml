@@ -435,6 +435,22 @@ jobs:
           import sqlite3, sys
           try:
               con = sqlite3.connect(sys.argv[1])
+
+              # 内核在 fake_db_init 里 `create_function("change_prefix", 3, ...)`
+              # 注册了这个 SQL 函数，path_rename 那条 PREPARE_OR_FAIL 依赖它。
+              # Python 默认没有，不注册的话 EXPLAIN 会报 "no such function"
+              # —— 那是假阴性（合格库也会被判红），必须补上。
+              def change_prefix(blob, start, repl):
+                  if blob is None:
+                      return None
+                  if isinstance(blob, str):
+                      blob = blob.encode()
+                  if isinstance(repl, str):
+                      repl = repl.encode()
+                  return repl + blob[int(start):]
+
+              con.create_function("change_prefix", 3, change_prefix)
+
               names = {r[0] for r in con.execute(
                   "select name from sqlite_master where type='table'")}
               residue = names & {"paths_old", "stats_old", "paths_new"}
@@ -472,20 +488,66 @@ jobs:
                   print("  !! 缺核心表 %s" % t)
                   ok = False
 
-          # 按内核的方式把关键语句 prepare 一遍。把 ? 换 NULL 只为
+          # 按内核的方式把语句 prepare 一遍。把 ? 换 NULL 只为
           # 绕开 Python 的绑定检查，语义等价（内核自己负责 bind）。
+          #
+          # ★ 这里必须覆盖 **fake_db_init 里全部 17 条 PREPARE_OR_FAIL**。
+          # 前一版只查了 3 条（wal + orphans 那两条），剩下 14 条任何一条
+          # 过不了都会让 fake_db_init 走 init_fail → mount 返回 _EIO(-5)，
+          # 而自检却是绿的 —— 这正是「CI 全绿但设备上还是 -5」的漏洞。
           for label, sql in [
               ("journal_mode=wal", "pragma journal_mode=wal"),
+              ("foreign_keys=true", "pragma foreign_keys=true"),
+              # 迁移后无条件执行的两条
               ("orphan sweep",
                "delete from stats where inode in (select inode from orphans) "
                "and not exists (select 1 from paths where inode = stats.inode)"),
               ("delete orphans", "delete from orphans"),
+              # meta 表
+              ("select db_inode", "select db_inode from meta"),
+              ("update db_inode", "update meta set db_inode = ?"),
+              # PREPARE_OR_FAIL 的 17 条
+              ("begin_deferred", "begin deferred"),
+              ("begin_immediate", "begin immediate"),
+              ("commit", "commit"),
+              ("rollback", "rollback"),
+              ("path_get_inode", "select inode from paths where path = ?"),
+              ("path_read_stat",
+               "select inode, stat from stats natural join paths where path = ?"),
+              ("path_create_stat", "insert into stats (stat) values (?)"),
+              ("path_create_path",
+               "insert or replace into paths values (?, last_insert_rowid())"),
+              ("inode_read_stat", "select stat from stats where inode = ?"),
+              ("inode_write_stat", "update stats set stat = ? where inode = ?"),
+              ("path_link",
+               "insert or replace into paths (path, inode) values (?, ?)"),
+              ("path_unlink", "delete from paths where path = ?"),
+              ("path_rename",
+               "update or replace paths set path = change_prefix(path, ?, ?) "
+               "where (path >= ? and path < ?) or path = ?"),
+              ("path_from_inode", "select path from paths where inode = ?"),
+              ("try_cleanup_inode",
+               "delete from stats where inode = ? "
+               "and not exists (select 1 from paths where inode = stats.inode)"),
+              ("orphan_note", "insert or ignore into orphans (inode) values (?)"),
+              ("orphan_clear", "delete from orphans where inode = ?"),
           ]:
               try:
                   con.execute("EXPLAIN " + sql.replace("?", "NULL"))
               except Exception as e:
-                  print("  !! %s 过不了: %s" % (label, e))
+                  print("  !! %s 过不了（设备上 init_fail -> -5）: %s" % (label, e))
                   ok = False
+
+          # db_inode 必须存在且可读。内核 fake_db_init 里是
+          # `select db_inode from meta` + 之后 update，缺列同样 -5。
+          try:
+              rows = con.execute("select db_inode from meta").fetchall()
+              if len(rows) != 1:
+                  print("  !! meta 表有 %d 行（内核按单行处理，必须正好 1 行）" % len(rows))
+                  ok = False
+          except Exception as e:
+              print("  !! meta.db_inode 读不出来: %s" % e)
+              ok = False
 
           con.close()
           if ok:
