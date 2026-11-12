@@ -22,6 +22,24 @@ extension AIChatViewModel {
                     let installElapsed = (CFAbsoluteTimeGetCurrent() - installStart) * 1000
                     logger.info("[KernelBoot] installIfNeeded: \(String(format: "%.1f", installElapsed))ms")
 
+                    // [T-fakefs-rebuild-storm] boot 之前先无条件修一次 meta.db。
+                    //
+                    // 为什么不能只靠「解压后校准」那一步：`installIfNeeded()`
+                    // 在老用户已安装、版本戳又对得上时会**直接 return**，
+                    // 一个字节都不碰 meta.db。而 1.77 恰恰会把 meta.db 弄成
+                    // 「db_inode=0 + 可能缺 orphans」的状态 —— 这种用户升级到
+                    // 本版时不会重装 rootfs，解压路径根本不会跑。
+                    //
+                    // 更要紧的是：一旦 meta.db 真的让内核在 fakefs_rebuild 里
+                    // 撞上 die()，boot 就**永远不返回**（die_handler 把线程睡死），
+                    // 下面的 -5 判断根本没机会执行。所以修复必须发生在
+                    // boot **之前**，不能指望 boot 失败后补救。
+                    //
+                    // 成本很低：打开一个 SQLite 连接、查几张表、写一个整数。
+                    // 表都齐的时候 changed=false，走完就退。
+                    let preRepair = RootfsManager.shared.repairMetaDBIfNeeded()
+                    logger.info("[KernelBoot] pre-boot meta.db check (changed=\(preRepair))")
+
                     let kernelStart = CFAbsoluteTimeGetCurrent()
                     let rootPath = RootfsManager.shared.rootfsPath.path
                     var err = ISHKernel.shared.boot(withRootPath: rootPath)
@@ -42,10 +60,12 @@ extension AIChatViewModel {
                     // 那种情况表现为界面永远卡在「正在启用内核」，连错误都看不到。
                     //
                     // repairMetaDBIfNeeded() 三件事一起做（清残表 / 补 orphans /
-                    // 校准 db_inode），上面两条路径都能覆盖。修完重试一次：
-                    // 还失败说明是别的原因（真损坏、没空间），再试只是浪费时间。
+                    // 校准 db_inode）。上面 boot 前已经调用过一次，这里再调是
+                    // 兜底：万一第一条路径漏了（比如 rootfs 刚被别处改动），
+                    // 修完重试一次还失败就是别的原因（真损坏、没空间），
+                    // 再试只是浪费时间。
                     if err == -5 {
-                        logger.warning("[KernelBoot] boot 返回 -5（meta.db EIO）— 尝试修复 meta.db 后重试一次")
+                        logger.warning("[KernelBoot] boot 返回 -5（meta.db EIO）— 再修一次并重试")
                         // isBooted 只有在 boot 全程成功末尾才置 YES；-5 来自
                         // mount_root → fake_db_init，位置在 become_first_process
                         // 之前，所以内核还是「没启动」的干净状态，可以重来。
