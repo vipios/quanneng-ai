@@ -196,6 +196,48 @@ create_fakefs() {
         log_error "Failed to create fakefs rootfs"
     fi
 
+    # ── 写 db_inode ──
+    #
+    # [T-fakefs-rebuild-storm] meta.db 的 meta 表里有一个 db_inode 列，
+    # 内核 mount 时拿它跟 meta.db 文件**自己的** st_ino 比：
+    #   相等 → 直接用，跳过重建
+    #   不等 → 调 fakefs_rebuild() 全表重建（几千条路径逐条 fstatat）
+    #
+    # fakefsify 产出的 meta.db 里 db_inode 是 0，而真 inode 永远不是 0，
+    # 所以**每次启动都会全量重建一次**。平时它只是白耗几秒，看不出问题；
+    # 但它（a）让首启特别慢，（b）一旦重建中途被打断就会留下
+    # paths_old / stats_old 残表，下次 `create table paths_old` 直接报
+    # "table already exists" → mount 返回 -EIO → App 卡在「正在启用内核」。
+    # 用户 1.77 首启 "Kernel boot failed: -5" 就是这个。
+    #
+    # 这里按内核自己的判据把 inode 写上。注意 zip 解压后 inode 会变，
+    # 所以写成什么值都无所谓 —— 真机上必然不等、必然重建一次。
+    # 关键是别写 0：写 0 等于「每次都比不上」。
+    #
+    # 用 python3 而不是 sqlite3 命令行：macOS runner 默认只有 sqlite 库，
+    # 没有 sqlite3 这个可执行文件（brew 里是另一份，没装）。
+    if command -v python3 >/dev/null 2>&1; then
+        python3 - "$OUTPUT_ROOTFS" <<'PYEOF'
+import os, sqlite3, sys
+root = sys.argv[1]
+db = os.path.join(root, "meta.db")
+try:
+    ino = os.stat(db).st_ino
+    con = sqlite3.connect(db)
+    con.execute("update meta set db_inode = ?", (ino,))
+    # 清掉可能残留的重建临时表 —— 留着就是下一颗雷。
+    con.execute("drop table if exists paths_old")
+    con.execute("drop table if exists stats_old")
+    con.commit()
+    con.close()
+    print("  meta.db db_inode = %d" % ino)
+except Exception as e:
+    print("  警告：写 db_inode 失败（%s），设备上会每次启动全量重建" % e)
+PYEOF
+    else
+        log_warning "  没有 python3，跳过 db_inode 写入（会导致每次启动全量重建）"
+    fi
+
     log_success "Fakefs rootfs created"
 }
 

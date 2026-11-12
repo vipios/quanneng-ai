@@ -520,6 +520,102 @@ class RootfsManager {
         }
     }
 
+    /// 尝试修好 `meta.db` 里的 bug，让下一次 mount 能过。
+    ///
+    /// [T-fakefs-rebuild-storm] 背景（2026-11-12 用户 1.77 首启
+    /// "Kernel boot failed: -5"）：
+    ///
+    /// 内核 `fake_db_init` 里有一段 inode 校验 —— 把 meta 表的 db_inode
+    /// 跟 meta.db 文件自己的 st_ino 比，不等就调 `fakefs_rebuild()` 全表重建。
+    /// 而 fakefsify 产出的 db_inode 是 **0**，真 inode 永远不是 0，
+    /// 所以**每次启动都全量重建一次**。
+    ///
+    /// `fakefs_rebuild` 的头几条 SQL 是：
+    ///     create table paths_old (...)
+    ///     create table stats_old (...)
+    /// 不带 if not exists。重建跑到一半被打断（用户等不及退出、系统杀进程），
+    /// 这两张残表就留在库里；下一次重建再执行 create 直接报
+    /// "table already exists" → `_EIO` → mount 返回 -5。
+    ///
+    /// 修法很直接：删掉残表，顺便把 db_inode 写成真实值。
+    /// 这样下一次 mount 要么不重建、要么能完整重建，两条路都通。
+    ///
+    /// 注意：这里**不重建 data/ 目录树**。只是清两张临时表 + 改一个整数，
+    /// 用户数据一个字节都不动。所以可以安全地在 boot 失败后立即调用。
+    @discardableResult
+    func repairMetaDBIfNeeded() -> Bool {
+        let metaDBPath = rootfsPath.appendingPathComponent("meta.db").path
+        guard FileManager.default.fileExists(atPath: metaDBPath) else { return false }
+
+        var db: OpaquePointer?
+        guard sqlite3_open_v2(metaDBPath, &db, SQLITE_OPEN_READWRITE, nil) == SQLITE_OK,
+              let db else {
+            logger.warning("[Rootfs] repairMetaDB: 打不开 meta.db")
+            return false
+        }
+        defer { sqlite3_close(db) }
+
+        var changed = false
+        for table in ["paths_old", "stats_old"] {
+            // DROP TABLE IF EXISTS 对不存在的表也返回 OK，所以不能靠返回值
+            // 判断「有没有真的删掉」。先查 sqlite_master 确认它存在。
+            var probe: OpaquePointer?
+            var existed = false
+            if sqlite3_prepare_v2(db,
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                -1, &probe, nil) == SQLITE_OK, let probe {
+                sqlite3_bind_text(probe, 1, table, -1, Self.SQLITE_TRANSIENT)
+                existed = sqlite3_step(probe) == SQLITE_ROW
+                sqlite3_finalize(probe)
+            }
+            if existed {
+                if sqlite3_exec(db, "DROP TABLE IF EXISTS \(table)", nil, nil, nil) == SQLITE_OK {
+                    changed = true
+                    logger.warning("[Rootfs] repairMetaDB: 删掉残表 \(table)")
+                } else {
+                    logger.error("[Rootfs] repairMetaDB: 删 \(table) 失败 — \(String(cString: sqlite3_errmsg(db)))")
+                }
+            }
+        }
+
+        // 把 db_inode 写成 meta.db 自己的 st_ino。
+        // 解压后 inode 变过，所以这个值下次启动一定又对不上、还要重建一次 ——
+        // 但那时候重建表是干净的，能跑完。跑完之后内核自己会把 db_inode
+        // 更新成当时的正确值，此后就不再重建了。
+        //
+        // 用 stat(2) 而不是 attributesOfItem：后者拿 [.systemFileNumber] 是走
+        // FileAttributeKey → NSNumber → UInt64 的桥接，出错时静默得 0
+        // （这个文件里 [.size] 已经踩过一次）。ino_t 是 C 类型，直接读最稳。
+        var st = stat()
+        if stat(metaDBPath, &st) == 0, st.st_ino != 0 {
+            let sql = "UPDATE meta SET db_inode = \(st.st_ino)"
+            if sqlite3_exec(db, sql, nil, nil, nil) == SQLITE_OK {
+                logger.info("[Rootfs] repairMetaDB: db_inode → \(st.st_ino)")
+                // 写成功也算「动过库」。残表可能本来就没有（真损坏的情形），
+                // 那时也要让调用方重试一次 —— 万一就是 db_inode 造成的。
+                changed = true
+            } else {
+                logger.warning("[Rootfs] repairMetaDB: 写 db_inode 失败")
+            }
+        }
+
+        // 顺手确认库本身没坏。integrity_check 返回 "ok" 才算过。
+        var stmt: OpaquePointer?
+        if sqlite3_prepare_v2(db, "PRAGMA integrity_check", -1, &stmt, nil) == SQLITE_OK, let stmt {
+            defer { sqlite3_finalize(stmt) }
+            if sqlite3_step(stmt) == SQLITE_ROW,
+               let cstr = sqlite3_column_text(stmt, 0) {
+                let verdict = String(cString: cstr)
+                if verdict != "ok" {
+                    logger.error("[Rootfs] repairMetaDB: integrity_check 报 \(verdict)")
+                }
+            }
+        }
+
+        logger.info("[Rootfs] repairMetaDB done (changed=\(changed))")
+        return changed
+    }
+
     /// Reset (delete) the rootfs, forcing a fresh install on next launch
     /// - Parameter keepUserData: If true, backs up /root directory before deletion
     /// - Returns: URL of backup directory if keepUserData was true, nil otherwise
