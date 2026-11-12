@@ -591,7 +591,9 @@ class RootfsManager {
         // 先读 user_version。它决定「要不要做全表 sweep」——
         // uv 已经是 4 说明内核迁移早跑完了，orphans 增量清理已经接管，
         // 没必要每次启动都扫一遍 stats（内核注释里量过：1.5M 行约 0.3s）。
-        var uvBefore = -1
+        // 类型注意：sqlite3_column_int 返回 Int32，所以这里也用 Int32，
+        // 别声明成 Int —— 直接赋值会报 cannot assign Int32 to Int。
+        var uvBefore: Int32 = -1
         var uvStmt: OpaquePointer?
         if sqlite3_prepare_v2(db, "PRAGMA user_version", -1, &uvStmt, nil) == SQLITE_OK,
            let uvStmt {
@@ -840,7 +842,8 @@ class RootfsManager {
                 let tblSet = Set(tables)
                 facts.append("表:\(tables.sorted().joined(separator: ","))")
 
-                var uv = -1
+                // 同 repairMetaDBIfNeeded：sqlite3_column_int 返回 Int32
+                var uv: Int32 = -1
                 var uvStmt: OpaquePointer?
                 if sqlite3_prepare_v2(db, "PRAGMA user_version", -1, &uvStmt, nil) == SQLITE_OK,
                    let uvStmt {
