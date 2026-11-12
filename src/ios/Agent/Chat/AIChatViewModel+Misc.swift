@@ -156,13 +156,27 @@ extension AIChatViewModel {
 
     /// 失败界面「重置内核环境」按钮的动作。
     ///
-    /// 删掉整个 rootfs 并标注需要重装。用 `keepUserData: true` 保住 `~`；
-    /// `/var/ai` 由 `installIfNeeded()` 的版本戳升级路径负责迁移
-    /// （走 `reinstallKeepingUserData()`）。
+    /// [T-reset-keeps-userdata] 走 `reinstallKeepingUserData()`，
+    /// **不是** `reset(keepUserData: true)`。
     ///
-    /// **不会**当场重装：`reset()` 之后内核在本进程内无法重新 mount
-    /// （`become_first_process` 不可逆），必须重启 App。所以这里更新状态、
-    /// 给出明确提示，让用户自己冷启动。
+    /// 区别是实质性的，不是写法偏好：
+    ///   · `reset(keepUserData:)` 只备份 `data/root`，备份完就撒手
+    ///     （返回的 backupURL 要调用方自己接），而且**完全不管 `var/ai`**
+    ///   · `var/ai` 底下是 workspace / attachments / skills / offloads，
+    ///     是用户最要紧的一份数据
+    ///
+    /// 内核挂不上时，用户点这个按钮是为了**救回来**。如果它在过程中
+    /// 悄悄丢了 `var/ai`，那比不修更糟 —— 之前界面上写着
+    /// 「你的 ~ 和 /var/ai 里的文件会保留」，而旧实现保不住 `var/ai`，
+    /// 那是假承诺。
+    ///
+    /// `reinstallKeepingUserData()` 做的是一整套：备份三项 → 删旧树 →
+    /// 解压新 rootfs → 拷回 → 逐项登记进 meta.db。装完 rootfs 就是
+    /// 「已安装」状态，用户下次启动直接 boot，不用再等一次解压。
+    ///
+    /// 但**本进程内仍然无法重新 boot**：`become_first_process` 不可逆，
+    /// 而且 `-5` 之后内核对象的状态也不保证干净。所以这里不装作已经好了，
+    /// 明确要求用户冷启动。
     func resetKernelEnvironment() {
         guard !kernelRepairing else { return }
         kernelRepairing = true
@@ -171,22 +185,28 @@ extension AIChatViewModel {
             guard let self else { return }
             var failure: String?
             do {
-                try RootfsManager.shared.reset(keepUserData: true)
+                // 走完整的那条路：备份 + 重装 + 恢复 + 登记。
+                try RootfsManager.shared.reinstallKeepingUserData()
             } catch {
                 failure = error.localizedDescription
-                logger.error("[KernelRepair] reset failed: \(error.localizedDescription)")
+                logger.error("[KernelRepair] reinstall failed: \(error.localizedDescription)")
             }
 
             self.kernelRepairing = false
             if let failure {
-                self.kernelStatus = .failed("重置失败：\(failure)")
-            } else {
-                // 这里故意写成「需要重启」而不是装作已经好了 ——
-                // 内核已经 boot 过的话本进程内不可能再挂载。
+                // 重装失败时用户数据仍在（reinstallKeepingUserData 内部
+                // 在装新的失败时会先 restoreBackup 再抛），所以这里
+                // 只说「没修成」，不要说成「数据没了」。
                 self.kernelStatus = .failed(
-                    "内核环境已重置。请完全关闭并重新打开 App，"
-                    + "下次启动会自动重新解压 rootfs（约 30 秒）。\n"
-                    + "你的 ~ 和 /var/ai 里的文件会保留。")
+                    "重置没成功：\(failure)\n"
+                    + "你的文件没有丢。可以再点一次，或到设置里反馈这行信息。")
+            } else {
+                // 故意写成「需要重启」而不是装作已经好了 ——
+                // become_first_process 不可逆，本进程内不可能再挂载。
+                self.kernelStatus = .failed(
+                    "内核环境已重建。请完全关闭并重新打开 App，"
+                    + "下次启动会直接启用内核（不用再等解压）。\n"
+                    + "你的 ~ 和 /var/ai 里的文件已保留。")
             }
         }
     }

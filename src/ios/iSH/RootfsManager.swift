@@ -177,6 +177,25 @@ class RootfsManager {
     /// place (leaking disk) rather than blocking the user, and is logged so it
     /// can be reclaimed later.
     private func discardOldRootfs() throws {
+        // [T-reset-keeps-userdata] 删之前登记「这棵树正在被删」。
+        //
+        // 本方法有三条调用路径，其中两条发生在内核**已经 boot 过**的时候：
+        //   · `reset()`            —— 明确的重置动作
+        //   · `reinstallKeepingUserData()` —— 失败界面的「重置内核环境」
+        // 只有安装换代那条发生在 boot 之前。
+        //
+        // 内核一旦 become_first_process，它的 fakefs 就挂在这棵树上。
+        // 树被删掉之后挂载点失效，终端若还复用（因为 isBooted 是 true
+        // 就跳过 boot），下一次 executeCommand 会直接崩。
+        // `didResetWhileBooted` 就是给这条路径兜底的：置位后终端会拒绝
+        // 启动 shell，直到用户重启 App。
+        //
+        // 放在这里而不是各调用方自己写，是为了「新增调用方时不会再漏」。
+        if ISHKernel.shared.isBooted {
+            didResetWhileBooted = true
+            logger.warning("[Rootfs] rootfs 被删除时内核已 booted —— 终端停用到重启")
+        }
+
         let fm = FileManager.default
         do {
             try fm.removeItem(at: rootfsPath)
@@ -268,7 +287,13 @@ class RootfsManager {
     ///
     /// 失败策略：备份失败就**放弃重装**并返回，宁可继续用旧 rootfs。
     /// 反过来说，绝不能为了换新工具链把用户数据搞丢。
-    private func reinstallKeepingUserData() throws {
+    ///
+    /// [T-reset-keeps-userdata] 访问级别是 internal 而不是 private，
+    /// 因为失败界面「重置内核环境」也要走这条路 —— 见
+    /// `resetKernelEnvironment()` 的说明。不要改成「调用方自己
+    /// backup + reset + restore」：那等于把这段容易出错的顺序逻辑
+    /// 复制到第二个地方。
+    func reinstallKeepingUserData() throws {
         let fm = FileManager.default
         let staging = fm.temporaryDirectory
             .appendingPathComponent("rootfs-upgrade-\(Int(Date().timeIntervalSince1970))",
@@ -295,6 +320,16 @@ class RootfsManager {
         }
 
         // 2. 删旧 rootfs
+        //
+        // [T-reset-keeps-userdata] 删之前必须登记「内核可能已经挂着这棵树」。
+        // 这条路现在有两个调用方：
+        //   · 版本戳变化时的自动换代（boot 之前，内核一定没起来）
+        //   · 失败界面的「重置内核环境」（boot **已经失败过**）
+        // 后者的内核状态不像前者那样干净：`-5` 只说明 mount 失败，不代表
+        // 内核对象里没有任何残留。一旦它其实已经 booted，而我们把这棵树删了，
+        // 终端还会复用那个失效的挂载并在下一次 executeCommand 时崩掉。
+        // `reset()` 对这件事有保护，这里同样要有 —— 所以挪进 `discardOldRootfs`
+        // 统一处理，而不是让每个调用方自己记得写。
         try discardOldRootfs()
 
         // 3. 装新的。这里递归调用自己在语义上有点绕，但能保证「装」的逻辑
@@ -919,15 +954,9 @@ class RootfsManager {
             logger.warning("[Rootfs] rootfs removed from \(rootfsPath.path)")
         }
 
-        // [T-rootfs-reset-terminal-crash] If the kernel already booted this
-        // session, its fakefs is now mounted against a deleted tree. The kernel
-        // cannot be re-mounted or un-booted in-process, so mark the session
-        // poisoned; the terminal start path checks this and refuses to reuse the
-        // stale mount (which would crash) until the app is relaunched.
-        if ISHKernel.shared.isBooted {
-            didResetWhileBooted = true
-            logger.warning("Rootfs reset while kernel booted; terminal disabled until app relaunch")
-        }
+        // 内核已 boot 但树被删掉的保护，现在由 `discardOldRootfs()` 统一处理
+        // （[T-reset-keeps-userdata]）——它在删之前置 `didResetWhileBooted`。
+        // 这里不再重复，免得两处各写一遍、以后新增调用方时漏掉。
 
         logger.info("[Rootfs] reset complete — installIfNeeded() will reinstall")
 
