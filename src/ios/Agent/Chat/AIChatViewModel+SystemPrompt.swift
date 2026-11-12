@@ -106,7 +106,10 @@ extension AIChatViewModel {
             // 门禁比工具注册更严一层：还要求本机确实编不了才该用它。
             // 这段字是模型判断"该不该走兜底"的唯一依据，写含糊了它就会
             // 把语法错误也推上云烧额度。
-            + (Self.toolEnabled(.githubBuild) && GitHubPush.shared.isReady
+            // [T-gh-switch-deadlock] 用 `canUseCloud`（登录 + 权限）而不是
+            // `isReady`（还要求仓库已配）。仓库允许留空、推送时自动建仓，
+            // 拿它卡提示词会让「自动建仓」这条路径永远走不到。
+            + (Self.toolEnabled(.githubBuild) && GitHubPush.shared.canUseCloud
                ? "- github_cloud_build: Send files to the user's GitHub repo and build them on a macOS runner. FALLBACK ONLY — see 'Cloud build fallback' below.\n"
                : "")
             // [T-user-ask-prompt-consolidated] The only user_ask text in the
@@ -286,10 +289,22 @@ extension AIChatViewModel {
     ///      语法错误也推上云，花掉额度换回一模一样的报错
     ///   3. 用户看得到什么 —— 上传的是他自己的仓库，别偷偷干
     var cloudBuildFallbackFragment: String {
-        guard Self.toolEnabled(.githubBuild), GitHubPush.shared.isReady else { return "" }
+        // [T-gh-switch-deadlock] 判据改用 `canUseCloud`，见工具注册处的说明。
+        guard Self.toolEnabled(.githubBuild), GitHubPush.shared.canUseCloud else { return "" }
+
+        // 仓库配了就说具体推到哪；没配就说「会按项目名建」。
+        // 原来这里无条件写 `GitHubPush.shared.repo`，仓库为空时会变成
+        // 「repository ()」——模型看到这种句子容易自己编一个仓库名。
+        let target: String
+        if GitHubPush.shared.repo.isEmpty {
+            target = "no repository has been configured yet, so calling the tool creates one named after the "
+                   + "`project` argument (keep that name stable across pushes so later pushes reuse the same repo)"
+        } else {
+            target = "repository \(GitHubPush.shared.repo)"
+        }
         return "\n\n"
             + "Cloud build fallback: ENABLED. The `github_cloud_build` tool sends files to the user's own GitHub "
-            + "repository (\(GitHubPush.shared.repo)) and runs a macOS GitHub Actions workflow there.\n"
+            + "\(target) and runs a macOS GitHub Actions workflow there.\n"
             + "- Use it ONLY as a fallback. First actually try to build in the sandbox — it has clang/gcc/make, "
             + "and `apk add` can install more. If the build succeeds locally, you are done; do not also push it.\n"
             + "- Escalate after local failure, or when the target plainly cannot be built here (needs Xcode, "

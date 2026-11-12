@@ -48,6 +48,76 @@ class RootfsManager {
         return rootfsPath.appendingPathComponent(".arch")
     }
 
+    // MARK: - [T-rootfs-never-updated] 工具链版本标记
+
+    /// 已装 rootfs 里记录的版本戳。guest 内的路径是
+    /// `/etc/quanneng-rootfs-version`，由 `deps/prepare_alpine_rootfs.sh`
+    /// 在打包时写入（内容形如 `3.20.3-1a2b3c4d5e6f7a8b`）。
+    ///
+    /// 注意这个文件在**两处**，用途不同，别搞混：
+    ///   · guest 里 `data/etc/quanneng-rootfs-version` —— 打包时写进去的，
+    ///     给用户和脚本看的，会跟着 zip 走
+    ///   · 宿主上 `.quanneng-rootfs-version`（rootfs 根目录）—— 安装时
+    ///     照抄一份，专供 `installIfNeeded()` 在 **boot 之前** 判断用
+    ///
+    /// 为什么不直接读 guest 里那份：那要先 boot 内核，而 `installIfNeeded()`
+    /// 恰恰在 boot 之前跑。boot 之后再判断就晚了 —— 内核一旦
+    /// become_first_process 就无法卸载重挂，删了 rootfs 会直接崩（见
+    /// `didResetWhileBooted` 那段注释）。
+    private var versionTagPath: URL {
+        return rootfsPath.appendingPathComponent(".quanneng-rootfs-version")
+    }
+
+    /// bundle 里这份 rootfs 的版本戳。首次访问时从 zip 里读一次并缓存。
+    ///
+    /// 为什么不跟宿主上的比「文件是否相同」而要读这个：我们要判断的是
+    /// 「bundle 里这份和已装的那份是不是同一批工具链」。读 zip 里那一行
+    /// 文字是成本最低的可靠办法 —— 不用解压 145MB。
+    private static var cachedBundleStamp: String?
+
+    /// 从 `alpine-rootfs.zip` 里读出 `/etc/quanneng-rootfs-version` 的内容。
+    /// 读不到（老 zip 没这个文件）返回 nil。
+    private func bundleRootfsStamp() -> String? {
+        if let cached = Self.cachedBundleStamp { return cached }
+
+        guard let zipURL = Bundle.main.url(forResource: "alpine-rootfs", withExtension: "zip"),
+              let archive = ZIPArchive(url: zipURL) else {
+            return nil
+        }
+        let wanted = "alpine-rootfs/data/etc/quanneng-rootfs-version"
+        for entry in archive.entries where entry.path == wanted {
+            guard let data = try? archive.extractData(for: entry) else { return nil }
+            let text = String(decoding: data, as: UTF8.self)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { return nil }
+            Self.cachedBundleStamp = text
+            return text
+        }
+        return nil
+    }
+
+    /// 宿主上已装那份的版本戳。读不到返回 nil。
+    private func installedRootfsStamp() -> String? {
+        guard let text = try? String(contentsOf: versionTagPath, encoding: .utf8) else {
+            return nil
+        }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    /// 工具链版本对不对得上（bundle 里的 vs 已装的）。
+    ///
+    /// 三种情况都算「对得上」，不重装：
+    ///   · 两边戳相同 —— 正常
+    ///   · bundle 里没有戳（老 zip）—— 没有依据，不动，别把用户 rootfs 白删一遍
+    ///   · 已装那份没有戳但 bundle 有 —— **算对不上**，要重装
+    ///     （这正是从 1.70 升上来的情形：老 rootfs 没有这个文件）
+    private var toolchainVersionMatches: Bool {
+        guard let bundleStamp = bundleRootfsStamp() else { return true }
+        guard let installed = installedRootfsStamp() else { return false }
+        return installed == bundleStamp
+    }
+
     var isInstalled: Bool {
         guard FileManager.default.fileExists(atPath: dataPath.path) else { return false }
         // Check architecture matches
@@ -166,10 +236,151 @@ class RootfsManager {
         }
     }
 
+    // MARK: - [T-rootfs-never-updated] 保留用户数据的重装
+
+    /// 要保留的用户数据，相对 `data/` 的路径。
+    ///
+    /// 只留这两个：
+    ///   · `root`   —— 用户 home。模型在这里放脚本、临时工程、~/.config
+    ///   · `var/ai` —— 共享目录。workspace / attachments / skills / offloads
+    ///                全在它下面，是最要紧的一份。
+    ///
+    /// 刻意**不含** `/tmp`、`/var/cache`、`/usr` 这些：它们要么是一次性的，
+    /// 要么属于 rootfs 本体，留着反而把新旧工具链混在一起。
+    private static let preservedUserDataPaths = ["root", "var/ai", "var/minis"]
+
+    /// 换 rootfs 但把用户数据搬过去。
+    ///
+    /// 为什么不复用 `reset(keepUserData:)`：那个方法只备份 `root`，
+    /// 而且备份完就结束了 —— 恢复要靠调用方自己再调 `restoreUserData()`，
+    /// 中间还得手动补 `meta.db`。这条路径还要恢复 `var/ai`（那个才是
+    /// 最要紧的），所以单独写一份更清楚。
+    ///
+    /// 步骤（顺序不能调）：
+    ///   1. 把这些目录拷到临时区
+    ///   2. 删掉整棵旧 rootfs
+    ///   3. 调 `installIfNeeded` 装新的 —— 递归调用，此时 isInstalled 为 false，
+    ///      会走完整的解压 + 写 .arch 流程
+    ///   4. 把临时区的东西拷回来
+    ///   5. **把拷回来的每个路径登记进 meta.db**
+    ///      —— 少了这步，文件在沙盒里但 fakefs 看不见：`ls` 里没有、
+    ///      `stat` 报不存在。之前预装工具链时踩过一模一样的坑。
+    ///
+    /// 失败策略：备份失败就**放弃重装**并返回，宁可继续用旧 rootfs。
+    /// 反过来说，绝不能为了换新工具链把用户数据搞丢。
+    private func reinstallKeepingUserData() throws {
+        let fm = FileManager.default
+        let staging = fm.temporaryDirectory
+            .appendingPathComponent("rootfs-upgrade-\(Int(Date().timeIntervalSince1970))",
+                                    isDirectory: true)
+        try fm.createDirectory(at: staging, withIntermediateDirectories: true)
+
+        var backedUp: [(name: String, url: URL)] = []
+        for name in Self.preservedUserDataPaths {
+            let src = dataPath.appendingPathComponent(name, isDirectory: true)
+            guard fm.fileExists(atPath: src.path) else { continue }
+            let dst = staging.appendingPathComponent(name, isDirectory: true)
+            do {
+                try fm.createDirectory(at: dst.deletingLastPathComponent(),
+                                       withIntermediateDirectories: true)
+                try fm.copyItem(at: src, to: dst)
+                backedUp.append((name, dst))
+                logger.info("[Rootfs] backed up \(name) for upgrade")
+            } catch {
+                // 备份不了就别升级了 —— 数据比新工具链重要。
+                logger.error("[Rootfs] failed to back up \(name): \(error.localizedDescription) — aborting upgrade, keeping old rootfs")
+                try? fm.removeItem(at: staging)
+                return
+            }
+        }
+
+        // 2. 删旧 rootfs
+        try discardOldRootfs()
+
+        // 3. 装新的。这里递归调用自己在语义上有点绕，但能保证「装」的逻辑
+        //    只有一份 —— 解压、写 .arch、建 var/ai 子目录、写版本戳全在那边。
+        //    此刻 rootfsPath 已不存在，isInstalled == false，不会无限递归。
+        //
+        //    解压失败时用户数据还在 staging 里，必须先恢复回去再抛 ——
+        //    否则用户就是「工具链没换成，数据也没了」，最坏的结果。
+        do {
+            try installIfNeeded()
+        } catch {
+            logger.error("[Rootfs] install during upgrade failed: \(error.localizedDescription) — restoring user data")
+            let restored = restoreBackup(backedUp)
+            if restored { try? fm.removeItem(at: staging) }
+            throw error
+        }
+
+        // 4. 拷回来。有没恢复成功的就保留 staging，别把数据一起删了。
+        let allRestored = restoreBackup(backedUp)
+        if allRestored {
+            try? fm.removeItem(at: staging)
+        } else {
+            logger.error("[Rootfs] some user data could not be restored — kept \(staging.path) for manual recovery")
+        }
+        logger.info("[Rootfs] toolchain upgrade complete (dataRestored=\(allRestored))")
+    }
+
+    /// 把备份搬回 rootfs 并登记进 meta.db。抽出来是因为成功路径和
+    /// 安装失败路径都要用。
+    ///
+    /// ⚠️ `mergeCopy` 是**移动**语义，搬走的就从 staging 里消失了。
+    /// 所以任何一项恢复失败，都要立刻把 staging 整个留下 ——
+    /// 否则失败那一项的数据会随着 `removeItem(at: staging)` 一起丢掉。
+    /// 返回 false 表示「有东西没恢复成功，别删 staging」。
+    @discardableResult
+    private func restoreBackup(_ backedUp: [(name: String, url: URL)]) -> Bool {
+        var allOK = true
+        for (name, src) in backedUp {
+            let dst = dataPath.appendingPathComponent(name, isDirectory: true)
+            do {
+                // 新 rootfs 里可能有同名目录（如 var/ai 的几个子目录），
+                // 用 merge 语义：逐项搬，遇到已存在的就替换。
+                try mergeCopy(from: src, to: dst)
+                // 登记进 meta.db —— 不登记等于没拷：
+                // 文件在沙盒里但 fakefs 看不见，ls 里没有、stat 报不存在。
+                registerSubtreeInMetaDB(hostRoot: dst)
+                logger.info("[Rootfs] restored \(name)")
+            } catch {
+                allOK = false
+                logger.error("[Rootfs] failed to restore \(name): \(error.localizedDescription) — data still in \(src.path)")
+            }
+        }
+        return allOK
+    }
+
+    /// 把 `src` 目录的内容合并进 `dst`（`dst` 可以已存在）。
+    private func mergeCopy(from src: URL, to dst: URL) throws {
+        let fm = FileManager.default
+        try fm.createDirectory(at: dst, withIntermediateDirectories: true)
+        let children = try fm.contentsOfDirectory(at: src, includingPropertiesForKeys: nil)
+        for child in children {
+            let target = dst.appendingPathComponent(child.lastPathComponent)
+            if fm.fileExists(atPath: target.path) {
+                try? fm.removeItem(at: target)
+            }
+            try fm.moveItem(at: child, to: target)
+        }
+    }
+
     func installIfNeeded() throws {
         if FileManager.default.fileExists(atPath: rootfsPath.path) && !isInstalled {
             logger.warning("[Rootfs] arch tag missing or mismatched — will delete and reinstall \(currentArch). archTag=\(archTagDiagnostic()) path=\(rootfsPath.path)")
             try discardOldRootfs()
+        }
+
+        // [T-rootfs-never-updated] 已装但工具链版本对不上 → 换代。
+        //
+        // 这条必须在 `isInstalled` 那个 return **之前**判，否则永远走不到：
+        // 老用户 `isInstalled` 一直是 true（data/ 在、.arch 是 aarch64），
+        // 于是新 ipa 里的 rootfs.zip 一辈子不解压，dpkg/xz/zstd 永远缺。
+        if isInstalled && !toolchainVersionMatches {
+            let installed = installedRootfsStamp() ?? "（无标记，老 rootfs）"
+            let bundled = bundleRootfsStamp() ?? "（bundle 无标记）"
+            logger.warning("[Rootfs] toolchain version changed — reinstalling. installed=\(installed) bundled=\(bundled)")
+            try reinstallKeepingUserData()
+            // 重装完成后往下走正常安装流程（此时 isInstalled 已为 false）
         }
 
         if isInstalled {
@@ -207,6 +418,21 @@ class RootfsManager {
 
         // Write architecture tag so we detect mismatches on future launches
         try currentArch.write(to: archTagPath, atomically: true, encoding: .utf8)
+
+        // [T-rootfs-never-updated] 把这份 rootfs 的版本戳记在 rootfs 根上，
+        // 下次启动 `toolchainVersionMatches` 拿它跟 bundle 里那份比。
+        //
+        // 为什么要在宿主上再存一份（zip 里 `/etc/quanneng-rootfs-version`
+        // 已经有一份）：判断发生在 boot **之前**，那时没法进 guest 读文件。
+        // 宿主这份是给自己看的副本，guest 那份是给用户和脚本看的。
+        if let stamp = bundleRootfsStamp() {
+            try stamp.write(to: versionTagPath, atomically: true, encoding: .utf8)
+            logger.info("[Rootfs] stamped toolchain version \(stamp)")
+        } else {
+            // bundle 里没有戳（旧 zip）。把旧戳清掉，免得下次误判成「版本相同」。
+            try? FileManager.default.removeItem(at: versionTagPath)
+            logger.info("[Rootfs] no version stamp in bundle (legacy zip) — version check disabled")
+        }
 
         // Pre-create /var/ai/ shared directory structure
         let minisSubdirs = ["var/ai/attachments", "var/ai/offloads", "var/ai/workspace", "var/ai/skills", "var/ai/shared"]

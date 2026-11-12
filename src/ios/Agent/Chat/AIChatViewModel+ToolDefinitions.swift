@@ -263,9 +263,14 @@ extension AIChatViewModel {
         // subagent_task 同一套机制。默认 OFF：把代码推到用户自己的 GitHub
         // 仓库这件事，必须是用户主动打开的，不能是默认行为。
         //
-        // 另外还要求 GitHubPush.isReady —— 开关开着但没登录没配仓库时，
-        // 广告一个永远会失败的工具只会让模型反复重试。配置不全时不给它。
-        if Self.toolEnabled(.githubBuild) && GitHubPush.shared.isReady {
+        // 另外还要求 GitHub 登录 + 权限够（`canUseCloud`）—— 开关开着但没登录
+        // 时，广告一个永远会失败的工具只会让模型反复重试。
+        //
+        // [T-gh-switch-deadlock] 这里原来判的是 `isReady`，而它额外要求
+        // 「仓库已配置」。可仓库设计上允许留空（推送时按项目名自动建仓），
+        // 于是「没配仓库 → 工具不给 → 自动建仓永远跑不到」形成死循环。
+        // 改用 `canUseCloud`：只认登录与权限，仓库交给推送那次按需创建。
+        if Self.toolEnabled(.githubBuild) && GitHubPush.shared.canUseCloud {
             tools.append(Self.gitHubCloudBuildToolDefinition)
         }
 
@@ -288,7 +293,7 @@ extension AIChatViewModel {
 
             Always try local first. The sandbox already has compilers (clang/gcc/make) — check with `shell_execute` before reaching for this tool. Do NOT use it for code whose failure is a genuine source error (syntax error, missing import, wrong type): pushing broken source to the cloud costs build minutes and returns exactly the same error.
 
-            Before calling, make sure the repository and workflow are already configured by the user in Settings → GitHub. If `readiness` says it is not ready, tell the user what is missing instead of calling.
+            Before calling, make sure the repository and workflow are already configured by the user in Settings → GitHub. If `readiness` says it is not ready, tell the user what is missing instead of calling. However, if no repository has been configured yet, you may still call: the tool will create one named after the `project` argument and install the build workflow into it, then push. Do that only when the user has not configured a repository — never create a second repository for a project that already has one.
 
             The tool pushes the given files as ONE commit, dispatches the workflow, and returns a run id plus a URL where the user can watch the log and download the artifact.
             """,
@@ -296,6 +301,16 @@ extension AIChatViewModel {
                 "tool_title": AgentToolParam(
                     type: .string,
                     description: "A concise 5-10 word summary of what this cloud build does, shown to the user (e.g. 'Build iOS app in the cloud', 'Push and run cloud build'). IMPORTANT: ALWAYS write this title in Simplified Chinese, never in English (e.g. 安装 Python 数据分析包, 查看系统配置)."),
+                // [T-gh-project-param] 这个参数原来**不存在**，于是 `ensureTarget`
+                // 拿到的 projectName 永远是空串，一路回落到硬编码的 "App-Projects"。
+                // 结果就是：用户做十个项目，全都撞进同一个仓库（createRepo 撞名
+                // 422 后「沿用同名仓库」），根本做不到「新项目开新仓」。
+                // 必须让模型能说清这是哪个项目，仓库名才分得开。
+                "project": AgentToolParam(
+                    type: .string,
+                    description: """
+                    Name of the project these files belong to (e.g. "trollagent", "weather-cli"). It becomes the GitHub repository name, so use a short stable slug: lowercase letters, digits, hyphen or underscore, no spaces, no Chinese. IMPORTANT: use the SAME name every time you push this same project again — that keeps upgrades in the one existing repository instead of creating a new one each time. Only use a different name when it is genuinely a different project.
+                    """),
                 "files": AgentToolParam(
                     type: .string,
                     description: """
@@ -312,7 +327,7 @@ extension AIChatViewModel {
                     description: "Optional JSON object of workflow_dispatch inputs, e.g. {\"target\": \"Release\"}. Leave empty to use the workflow defaults."),
             ],
             required: ["tool_title", "files", "reason"],
-            propertyOrdering: ["tool_title", "files", "message", "reason", "inputs"]
+            propertyOrdering: ["tool_title", "project", "files", "message", "reason", "inputs"]
         )
     }
 

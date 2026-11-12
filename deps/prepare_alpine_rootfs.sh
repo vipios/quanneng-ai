@@ -291,6 +291,41 @@ https://dl-cdn.alpinelinux.org/alpine/v${ALPINE_VERSION}/main
 https://dl-cdn.alpinelinux.org/alpine/v${ALPINE_VERSION}/community
 EOF
 
+    # ── 工具链版本戳 ─────────────────────────────────────────────
+    #
+    # [T-rootfs-never-updated] 这个文件是「App 侧要不要重装 rootfs」的唯一依据。
+    #
+    # 在此之前 App 的 `RootfsManager.isInstalled` 只检查两件事：
+    # `data/` 目录存在、`.arch` 内容是 aarch64。**它完全不看 rootfs 的版本**，
+    # 于是 `installIfNeeded()` 里那个 `if isInstalled { return }` 一旦成立，
+    # 新 ipa 里这份 zip 就永远不会被解压 —— 设备上一直是第一次装的那份。
+    #
+    # 症状（2026-11-12 实测）：用户 1.70 装的 rootfs 里是 clang 19.1.4、
+    # 没有 dpkg/xz/zstd；升到 1.73 后这些工具依然全缺，`apk info -e dpkg`
+    # 说没装，`ls /usr/bin | grep ^dpkg` 一个都没有。查 CI 日志怎么查都对不上，
+    # 因为 CI 打的那 78 个包里明明有 dpkg —— 那份 rootfs 根本没被用上。
+    #
+    # 戳的内容：Alpine 版本 + 预装包清单的 sha256 前 16 位。
+    # 为什么用「包清单指纹」而不是时间戳：时间戳每次构建都变，会让所有
+    # 用户每次升级都重装 rootfs（几十秒 + 丢缓存）；包清单不变时指纹不变，
+    # 只有真的改了工具链才触发重装，这才是正确的粒度。
+    #
+    # 用 shasum -a 256 而不是 sha256sum：CI 跑在 macos runner 上，
+    # 那里没有 GNU coreutils 的 sha256sum。shasum 是 macOS 自带的 perl 脚本，
+    # 两个都要能跑，所以按可用性选。
+    local hash_cmd
+    if command -v sha256sum >/dev/null 2>&1; then
+        hash_cmd="sha256sum"
+    else
+        hash_cmd="shasum -a 256"
+    fi
+    local pkg_fingerprint
+    pkg_fingerprint=$(printf '%s\n' "${PRESEED_PACKAGES[@]}" | sort | $hash_cmd | cut -c1-16)
+    local stamp="${ALPINE_VERSION}.${ALPINE_MINOR}-${pkg_fingerprint}"
+
+    printf '%s\n' "$stamp" > "$ROOTFS_DATA/etc/quanneng-rootfs-version"
+    log_info "  rootfs 版本戳：$stamp"
+
     log_success "Rootfs configured"
 }
 

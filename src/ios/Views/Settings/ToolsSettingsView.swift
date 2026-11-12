@@ -186,9 +186,13 @@ struct ToolsSettingsView: View {
         } footer: {
             VStack(alignment: .leading, spacing: 4) {
                 Text(AppLocalized("Lets the assistant push code to your own GitHub repository and build it on a macOS runner — but only as a fallback, after building locally has failed. When off, the tool is removed from every conversation: the assistant does not know it exists."))
-                // 打开但没配好 = 打开了也白搭。这里直接说出门槛在哪，
+                // 打开但没登录/没权限 = 打开了也白搭。这里直接说出门槛在哪，
                 // 不然用户会以为开关坏了。
-                if githubBuildEnabled && !GitHubPush.shared.isReady {
+                //
+                // [T-gh-switch-deadlock] 判据用 `canUseCloud` 而不是 `isReady`：
+                // 仓库可以留空（首次推送自动建仓），留空不算「没配置好」，
+                // 否则每台新设备都会顶着一条橙色告警。
+                if githubBuildEnabled && !GitHubPush.shared.canUseCloud {
                     Text(AppLocalized("Not configured yet: \(GitHubPush.shared.readinessHint). Open Settings › Storage › GitHub Account to finish setting it up."))
                         .font(.caption)
                         .foregroundStyle(.orange)

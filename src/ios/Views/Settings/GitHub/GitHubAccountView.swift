@@ -50,7 +50,14 @@ struct GitHubAccountView: View {
         }
         .navigationTitle("GitHub 账号")
         .navigationBarTitleDisplayMode(.inline)
-        .onAppear { store.reloadFromDisk() }
+        .onAppear {
+            store.reloadFromDisk()
+            // [T-gh-toolchain-never-probed] 顺手探一次本机工具链。
+            // 没登录就不探 —— 那一行在未登录时不显示，白起一次内核。
+            if store.signedIn {
+                store.probeToolchainIfNeeded()
+            }
+        }
         .sheet(isPresented: $showSecretSheet) {
             secretSheet
         }
@@ -169,9 +176,17 @@ struct GitHubAccountView: View {
                 Text("云端编译兜底")
             }
             // 条件不齐时不许打开：打开了也只会让 AI 反复调一个必然失败的工具，
-            // 白烧一轮对话。置灰比事后报错诚实 —— 这也是唯一的状态提示，
-            // 不需要额外一行小字去解释「为什么拨不动」。
+            // 白烧一轮对话。
+            //
+            // [T-gh-switch-deadlock] 判据从「必须配好仓库」放宽到「登录 + 权限够」。
+            // 仓库可以留空（推的时候按项目名自动建仓），不该挡着开关。
             .disabled(!store.fallbackEnabled && !store.canToggleFallback)
+        } footer: {
+            // 置灰必须说明原因。之前只有置灰没有文字，用户看到的就是
+            // 「打不开、没反应」，完全无从下手。
+            if let why = store.fallbackBlockedReason {
+                Text(why).foregroundColor(.orange)
+            }
         }
     }
 
@@ -614,6 +629,14 @@ struct GitHubAccountView: View {
                     Text("未检测").font(.caption).foregroundColor(.secondary)
                 }
             }
+            // [T-gh-toolchain-never-probed] 这一行原来纯只读，用户看到
+            // 「未检测」既不知道什么意思，也没有任何办法触发检测。
+            // 现在点一下重测（force 绕过 5 分钟的缓存）。
+            .contentShape(Rectangle())
+            .onTapGesture {
+                guard !store.probingToolchain else { return }
+                store.probeToolchainIfNeeded(force: true)
+            }
 
             if let d = store.lastDecision {
                 VStack(alignment: .leading, spacing: 4) {
@@ -635,6 +658,10 @@ struct GitHubAccountView: View {
             VStack(alignment: .leading, spacing: 8) {
                 Text("**顺序**：本机能编就本机编 → 本机失败且是偶发问题就重试一次 → 还是不行才推到 GitHub。")
                 Text("**不会**把源码本身有错的活推上云 —— 那只会花额度换一个一模一样的报错。")
+                // 探测会起一次 iSH 内核，第一次进这个页面会慢一两秒。
+                // 说清楚，免得用户以为卡住了。
+                Text("点「本机工具链」那一行可以重新检测（第一次检测要启动 Linux 环境，会等一两秒）。")
+                    .foregroundColor(.secondary)
             }
         }
     }
