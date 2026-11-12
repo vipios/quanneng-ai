@@ -121,6 +121,72 @@ extension AIChatView {
                 }
             }
             .transition(.opacity)
+        case .needsRelaunch(let msg):
+            // [T-needs-relaunch-state] 「重置内核环境」**成功了**，只差冷启动。
+            //
+            // 这跟 `.failed` 是两件事，界面必须能区分：数据层面已经全好了
+            // （rootfs 重建完、用户数据搬回并登记进 meta.db），没有任何需要
+            // 用户再动手的地方。唯一的限制是 become_first_process 不可逆。
+            //
+            // 所以这里刻意**不用红色**、不放感叹号、也不给「修复/重置」按钮
+            // —— 那些都属于「还没好，你需要再试一次」的语义。给一个中性色
+            // 的勾 + 一句明确的下一步就够了。
+            //
+            // 点过「知道了」之后就不再挡住界面：用户可能想回去看看会话、
+            // 翻翻文件，只是发消息会被拦（见 blocksKernelUse）。
+            if vm.needsRelaunchAcknowledged {
+                EmptyView()
+            } else {
+                ZStack {
+                    ChatColors.background
+                        .ignoresSafeArea()
+                    ScrollView {
+                        VStack(spacing: 14) {
+                            Image(systemName: "checkmark.circle.fill")
+                                .font(.title2)
+                                .foregroundStyle(Color.accentColor)
+
+                            Text(msg)
+                                .font(.subheadline)
+                                .foregroundStyle(ChatColors.primaryText)
+                                .multilineTextAlignment(.center)
+                                .textSelection(.enabled)
+                                .padding(.horizontal, 28)
+                                .padding(.top, 2)
+
+                            // 唯一可点的东西：把状态收起来，回到能看到会话列表的
+                            // 界面。**不**提供「再试一次」—— 本进程内内核起不来，
+                            // 给这种按钮只会让人反复点、反复失望。
+                            //
+                            // 点完之后 kernelStatus 保持 needsRelaunch 不变
+                            // （见 dismissNeedsRelaunchOverlay），只是不再盖住
+                            // 整个界面；发消息仍然会被拦住。
+                            Button {
+                                vm.dismissNeedsRelaunchOverlay()
+                            } label: {
+                                Text("知道了")
+                                    .font(.subheadline.weight(.medium))
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 11)
+                                    .background(Color.accentColor.opacity(0.14))
+                                    .foregroundStyle(Color.accentColor)
+                                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                            }
+                            .padding(.horizontal, 28)
+                            .padding(.top, 8)
+
+                            Text("你不需要再做别的操作。数据都在，重启 App 就能继续用。")
+                                .font(.caption2)
+                                .foregroundStyle(ChatColors.tertiaryText)
+                                .multilineTextAlignment(.center)
+                                .padding(.horizontal, 28)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 40)
+                    }
+                }
+                .transition(.opacity)
+            }
         default:
             EmptyView()
         }

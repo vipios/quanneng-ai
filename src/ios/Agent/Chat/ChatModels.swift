@@ -724,7 +724,52 @@ enum KernelStatus: Equatable {
     case notBooted
     case booting
     case booted
+    /// 出了错，且**还需要用户动手**（修库重试 / 重置）。
+    ///
+    /// 界面是红色错误页，带两个按钮。
     case failed(String)
+    /// 已经处理完了，只差一次冷启动。
+    ///
+    /// [T-needs-relaunch-state] 为什么不能继续复用 `.failed`：
+    ///
+    /// 「重置内核环境」成功之后，rootfs 已经重建好了、用户数据也搬回来了，
+    /// 数据层面**没有任何问题**。唯一的限制是 `become_first_process` 不可逆，
+    /// 本进程内没法重新 mount，所以必须重启 App。
+    ///
+    /// 之前这种情况也塞进 `.failed`，于是界面给用户看的是：一个红色感叹号、
+    /// 一段红字、外加「修复并重试 / 重置内核环境」两个按钮 —— 用户合理地理
+    /// 解为「又失败了」，很可能再点一次重置，白等 30 秒重新解压一遍。
+    ///
+    /// 单独一个 case 才能把「还需要你动手」和「已经好了，只差重启」分开表达。
+    ///
+    /// 注意：这个状态**不可用于继续发消息**。内核没起来，`Send` / `Rerun`
+    /// 里那些 `if case .failed` 的拦截必须把这里也算进去（已加
+    /// `blocksKernelUse` 帮它们统一判断）。
+    case needsRelaunch(String)
+
+    /// 内核当前不可用，不能继续发消息 / 跑命令。
+    ///
+    /// 抽出来是为了让 `Send` / `Rerun` 里那 8 处拦截不用各写一遍
+    /// `if case .failed = ... || case .needsRelaunch = ...` —— 新增状态时
+    /// 只要改这里一处，不会漏掉某个调用点导致「带着没起来的内核继续跑」。
+    var blocksKernelUse: Bool {
+        switch self {
+        case .failed, .needsRelaunch:
+            return true
+        case .notBooted, .booting, .booted:
+            return false
+        }
+    }
+
+    /// 需要展示给用户的原因（`.failed` / `.needsRelaunch` 才有）。
+    var blockingMessage: String? {
+        switch self {
+        case .failed(let m), .needsRelaunch(let m):
+            return m
+        case .notBooted, .booting, .booted:
+            return nil
+        }
+    }
 }
 
 /// A tool snapshot item for UI display in the snapshot bar.

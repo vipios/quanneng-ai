@@ -149,6 +149,9 @@ extension AIChatViewModel {
             // 修完必须回到 notBooted 才能让 ensureKernelBooted 继续往下走。
             // 注意 reset 的是**状态机**，不是 rootfs。
             self.kernelRepairing = false
+            // 顺手把「已读提示」清掉：这一轮是全新的尝试，如果又走到
+            // .needsRelaunch，提示必须重新出现，不能被上次的已读状态吞掉。
+            self.needsRelaunchAcknowledged = false
             self.kernelStatus = .notBooted
             self.ensureKernelBooted()
         }
@@ -180,6 +183,9 @@ extension AIChatViewModel {
     func resetKernelEnvironment() {
         guard !kernelRepairing else { return }
         kernelRepairing = true
+        // 又要走一轮，先把「已读提示」清掉 —— 否则这轮如果又成
+        // .needsRelaunch，用户会看不到任何提示（被上次的已读吞掉）。
+        needsRelaunchAcknowledged = false
 
         Task { [weak self] in
             guard let self else { return }
@@ -197,18 +203,41 @@ extension AIChatViewModel {
                 // 重装失败时用户数据仍在（reinstallKeepingUserData 内部
                 // 在装新的失败时会先 restoreBackup 再抛），所以这里
                 // 只说「没修成」，不要说成「数据没了」。
+                // 用 `.failed`（不是 needsRelaunch）：这次是真没弄好，
+                // 界面该保留那两个按钮让用户再试。
                 self.kernelStatus = .failed(
                     "重置没成功：\(failure)\n"
                     + "你的文件没有丢。可以再点一次，或到设置里反馈这行信息。")
             } else {
-                // 故意写成「需要重启」而不是装作已经好了 ——
-                // become_first_process 不可逆，本进程内不可能再挂载。
-                self.kernelStatus = .failed(
-                    "内核环境已重建。请完全关闭并重新打开 App，"
-                    + "下次启动会直接启用内核（不用再等解压）。\n"
-                    + "你的 ~ 和 /var/ai 里的文件已保留。")
+                // [T-needs-relaunch-state] 成功了，用 `.needsRelaunch`
+                // 而不是 `.failed`。
+                //
+                // 数据层面已经全好了：rootfs 重建完、用户数据搬回并登记进
+                // meta.db。唯一的限制是 become_first_process 不可逆 ——
+                // 本进程内没法重新 mount，所以必须冷启动。
+                //
+                // 塞进 `.failed` 的后果是界面给用户看红色感叹号 + 红字 +
+                // 两个「修复/重置」按钮，用户以为又失败了，很可能再点一次
+                // 重置，白等 30 秒重新解压。这两种情况必须分开表达。
+                self.kernelStatus = .needsRelaunch(
+                    "内核环境已重建，用户数据已保留。\n"
+                    + "请完全关闭并重新打开 App —— 下次启动会直接启用内核，不用再等解压。")
             }
         }
+    }
+
+    /// [T-needs-relaunch-state] 收起 `.needsRelaunch` 的全屏提示。
+    ///
+    /// 只置一个标志，**不动 kernelStatus**：
+    ///   · 改成 `.notBooted` 会让 `ensureKernelBooted()` 又去 boot 一次，
+    ///     而 `become_first_process` 不可逆，必然再失败、再把用户扔回红页
+    ///   · 保持 `.needsRelaunch` 才能让 `Send` / `Rerun` 里的拦截继续生效
+    ///     （`blocksKernelUse` 为 true），不会带着没起来的内核发消息
+    ///
+    /// 换句话说：提示可以收，限制不能松。
+    func dismissNeedsRelaunchOverlay() {
+        needsRelaunchAcknowledged = true
+        logger.info("[KernelRepair] needsRelaunch 提示已收起（内核仍不可用，需冷启动）")
     }
 
     // MARK: - Prompt Queue

@@ -1248,6 +1248,17 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
     /// 与 `kernelStatus` 分开：这两个动作**不是** boot 过程的一部分，
     /// 塞进 KernelStatus 会让 `.booting` 的「正在启用内核」提示误出现。
     @Published var kernelRepairing = false
+    /// [T-needs-relaunch-state] 用户已经点了「知道了」，把 `.needsRelaunch`
+    /// 那层全屏提示收起来。
+    ///
+    /// 为什么不是直接把 kernelStatus 改成 `.notBooted`：那会让
+    /// `ensureKernelBooted()` 的下一次调用又去 boot，而本进程内
+    /// `become_first_process` 已经不可逆，boot 只会失败一次、把用户又扔回
+    /// 红色错误页。状态必须保持 needsRelaunch，只是不再挡住界面。
+    ///
+    /// 也不持久化：冷启动后 kernelStatus 本来就是 .notBooted，这个标志
+    /// 跟着进程一起消失即可。
+    @Published var needsRelaunchAcknowledged = false
     /// When enabled, agent responses and tool descriptions are spoken aloud.
     /// Initialized from the persisted "Read replies" preference so an already-on
     /// toggle drives streaming TTS for new chats.

@@ -277,7 +277,11 @@ extension AIChatViewModel {
             while self.kernelStatus == .booting {
                 try? await Task.sleep(nanoseconds: 100_000_000)
             }
-            if case .failed(let msg) = self.kernelStatus {
+            // [T-needs-relaunch-state] 用 blocksKernelUse 而不是只匹配
+            // .failed —— 重置成功后的 .needsRelaunch 同样意味着内核没起来，
+            // 这时候放过去就是「带着没 mount 的 fakefs 跑命令」。
+            if self.kernelStatus.blocksKernelUse,
+               let msg = self.kernelStatus.blockingMessage {
                 self.errorMessage = "Kernel not available: \(msg)"
                 self.isProcessing = false
                 self.endBackgroundProcessing()
