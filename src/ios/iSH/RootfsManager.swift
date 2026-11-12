@@ -851,8 +851,14 @@ class RootfsManager {
         let writeVersion = head[base + 18]
         let readVersion = head[base + 19]
         let pageCount = Int(be32(28))
-        let fileSize = ((try? FileManager.default.attributesOfItem(atPath: path))?
-            [.size] as? NSNumber)?.intValue ?? -1
+        // 别写成 `((try? ...)?\n[.size] as? NSNumber)` —— 把 `?` 断在行尾、
+        // `[` 起下一行，Swift 会把它当成三元运算符 + 数组字面量去解析，
+        // 报 `expected ',' separator`（1.86 的第一次 CI 就是这么挂的）。
+        var fileSize = -1
+        if let attrs = try? FileManager.default.attributesOfItem(atPath: path),
+           let sz = attrs[.size] as? NSNumber {
+            fileSize = sz.intValue
+        }
 
         var flags: [String] = []
         if pageSize <= 0 || (pageSize & (pageSize - 1)) != 0 { flags.append("页大小非法") }
@@ -1045,10 +1051,17 @@ class RootfsManager {
         }
 
         // 验证：能打开、有 meta 表、meta 恰好一行。三条缺一不可 ——
-        // 缺了任何一条，换上去只会把「读不出来」换成「读出来但内核 die」。
+        // 缺了任何一条，换上去只会把「读出来」换成「读出来但内核 die」。
+        //
+        // 用 READWRITE 而不是 READONLY：包里的库是 **WAL 模式**（头里 wv=2 rv=2），
+        // 只读打开时 SQLite 没法 checkpoint，close 之后会在旁边留下
+        // `xxx-shm` / `xxx-wal` 两个文件 —— 而这个 xxx 是临时名，
+        // 换名之后它们就成了永远没人清的无主垃圾（每次自救留一对）。
+        // 用读写打开，最后一个连接关闭时会自己 checkpoint 并删掉这两个。
         var db: OpaquePointer?
         var verified = false
-        if sqlite3_open_v2(incomingURL.path, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK, let db {
+        if sqlite3_open_v2(incomingURL.path, &db, SQLITE_OPEN_READWRITE, nil) == SQLITE_OK,
+           let db {
             var stmt: OpaquePointer?
             if sqlite3_prepare_v2(db, "SELECT count(*) FROM meta", -1, &stmt, nil) == SQLITE_OK,
                let stmt {
@@ -1071,6 +1084,12 @@ class RootfsManager {
             try? fm.moveItem(at: metaDBURL, to: corruptURL)
         }
         try? fm.moveItem(at: incomingURL, to: metaDBURL)
+
+        // 临时名下面的伴生文件不可能属于最终这份库（名字都不一样），
+        // 上面那次 move 也不会带它们走。显式清掉，别留成无主垃圾。
+        for suffix in Self.metaDBSidecars {
+            try? fm.removeItem(atPath: incomingURL.path + suffix)
+        }
 
         // 3. 换完才清伴生文件 —— 旧 shm 属于旧库，留着必然配不上对。
         purgeMetaDBSidecars(aggressive: true)
@@ -1248,12 +1267,46 @@ class RootfsManager {
                  "DELETE FROM stats WHERE NOT EXISTS "
                  + "(SELECT 1 FROM paths WHERE inode = stats.inode)"))
         }
+        var terminalOK = true
         for step in terminalSteps {
             if sqlite3_exec(db, step.sql, nil, nil, nil) != SQLITE_OK {
-                // 不直接 return —— 能修的继续修，最后靠 uv 是否推上去判定。
+                terminalOK = false
                 logger.error("[Rootfs] repairMetaDB: \(step.label) 失败 — "
                              + String(cString: sqlite3_errmsg(db)))
             }
+        }
+
+        // 推 uv 之前必须先确认三张核心表真的在了。
+        //
+        // 这里是本文件最危险的一处「自作聪明」：上面 DDL 失败只记日志、
+        // 继续往下走，然后无条件 `PRAGMA user_version = 4`。一旦
+        // `create table orphans` 因为锁/IO 失败，就正好造出
+        //   uv=4 + orphans 不存在
+        // —— 内核 `fakefs_migrate` 看 uv 已到 4 整段跳过，接着
+        // `PREPARE_OR_FAIL(orphan_note, "insert or ignore into orphans ...")`
+        // 撞 `no such table` → `goto init_fail` → **-5**。
+        // 也就是「修库这一步亲手把库弄成必死」，而且每启动一次就再犯一次，
+        // 除了重装 rootfs 没有出路 —— 和用户报的「重置只能管一次」同形。
+        //
+        // 所以改成「验证通过才推」。验证用 prepare 而不是 count(*)：
+        // 只要表在、列在就够，不需要真的扫数据。
+        func tableReady(_ sql: String) -> Bool {
+            var s: OpaquePointer?
+            let r = sqlite3_prepare_v2(db, sql, -1, &s, nil)
+            if let s { sqlite3_finalize(s) }
+            return r == SQLITE_OK
+        }
+        // 只查内核真正依赖的四张表，不查 `db_inode` 这类列 ——
+        // 列由内核自己的迁移补，这里多要求一条反而可能把老库卡在 uv=3。
+        let coreTablesReady = tableReady("select inode from paths where path = ?")
+            && tableReady("select stat from stats where inode = ?")
+            && tableReady("select inode from orphans")
+            && tableReady("select count(*) from meta")
+        if !coreTablesReady || !terminalOK {
+            logger.error("[Rootfs] repairMetaDB: 核心表/迁移终态没做成"
+                         + "（terminalOK=\(terminalOK) coreTables=\(coreTablesReady)）"
+                         + " —— 不推 user_version，避免造出「uv=4 但缺表」的必死组合")
+            return healed
         }
 
         // ── 2. 把 `user_version` 推到 4 ──
