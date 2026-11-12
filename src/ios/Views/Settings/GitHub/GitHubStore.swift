@@ -18,6 +18,11 @@
 import Foundation
 import SwiftUI
 
+// [T-gh-toolchain-never-probed] 工具链探测是后台跑内核，得留日志。
+// 这个文件原来一个 logger 都没有 —— 上一版 `refreshToolchain(executor:)`
+// 静默躺着没人调，就是因为没日志也没界面反馈，谁都不知道它没跑。
+private let logger = AppLogger(category: "GitHubStore")
+
 @MainActor
 final class GitHubStore: ObservableObject {
 
