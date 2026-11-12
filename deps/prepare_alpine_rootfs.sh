@@ -196,46 +196,55 @@ create_fakefs() {
         log_error "Failed to create fakefs rootfs"
     fi
 
-    # ── 写 db_inode ──
+    # ── meta.db 收尾：清残表 / 补 orphans / 对齐 schema ──
     #
-    # [T-fakefs-rebuild-storm] meta.db 的 meta 表里有一个 db_inode 列，
-    # 内核 mount 时拿它跟 meta.db 文件**自己的** st_ino 比：
-    #   相等 → 直接用，跳过重建
-    #   不等 → 调 fakefs_rebuild() 全表重建（几千条路径逐条 fstatat）
+    # [T-fakefs-rebuild-storm] 这一段只做「让包里的 meta.db 处于干净可用状态」，
+    # **不写 db_inode**。原因：db_inode 存的是 meta.db 文件自己的 st_ino，
+    # 而这个包要经过 zip 压缩 → 传到设备 → 解压，解压后 inode 必然全变。
+    # 在这里写什么值都注定对不上，写了等于没写。
     #
-    # fakefsify 产出的 meta.db 里 db_inode 是 0，而真 inode 永远不是 0，
-    # 所以**每次启动都会全量重建一次**。平时它只是白耗几秒，看不出问题；
-    # 但它（a）让首启特别慢，（b）一旦重建中途被打断就会留下
-    # paths_old / stats_old 残表，下次 `create table paths_old` 直接报
-    # "table already exists" → mount 返回 -EIO → App 卡在「正在启用内核」。
-    # 用户 1.77 首启 "Kernel boot failed: -5" 就是这个。
+    # 真正的 db_inode 校准放在 App 侧：`RootfsManager.repairMetaDBIfNeeded()`
+    # 在解压完成后立刻按设备上的真实 st_ino 改写，那才是唯一有效的位置。
     #
-    # 这里按内核自己的判据把 inode 写上。注意 zip 解压后 inode 会变，
-    # 所以写成什么值都无所谓 —— 真机上必然不等、必然重建一次。
-    # 关键是别写 0：写 0 等于「每次都比不上」。
+    # 这里负责三件事：
+    #   1. 删掉 paths_old / stats_old —— fakefs_rebuild 的临时表，不带
+    #      if not exists。留着就会让设备上第一次重建在 create 处 die()，
+    #      而 iOS 的 die_handler 只挂起线程不崩进程，界面就永远卡在
+    #      「正在启用内核」。这是最难查的一类卡死，必须在源头清掉。
+    #   2. 补建 orphans 表 —— fake_db_init 在迁移之后**无条件**执行
+    #      `delete from stats where inode in (select inode from orphans)`。
+    #      user_version 已经是 4 而表偏偏不存在时，这条直接失败 →
+    #      init_fail → 返回 _EIO(-5)。补一张空表，成本为零。
+    #   3. 把 user_version 推到最新 —— 让设备上的迁移循环一条都不用跑。
     #
     # 用 python3 而不是 sqlite3 命令行：macOS runner 默认只有 sqlite 库，
     # 没有 sqlite3 这个可执行文件（brew 里是另一份，没装）。
     if command -v python3 >/dev/null 2>&1; then
         python3 - "$OUTPUT_ROOTFS" <<'PYEOF'
-import os, sqlite3, sys
+import sqlite3, sys
 root = sys.argv[1]
-db = os.path.join(root, "meta.db")
+db = root + "/meta.db"
 try:
-    ino = os.stat(db).st_ino
     con = sqlite3.connect(db)
-    con.execute("update meta set db_inode = ?", (ino,))
-    # 清掉可能残留的重建临时表 —— 留着就是下一颗雷。
+    con.isolation_level = None
     con.execute("drop table if exists paths_old")
     con.execute("drop table if exists stats_old")
+    con.execute("create table if not exists orphans (inode integer primary key)")
+    # 内核 fakefs_migrate 的 migrations 数组长度就是当前 schema 版本。
+    # 对齐到 4（v1 索引 / v2 外键+trigger / v3 删 trigger / v4 orphans）。
+    # 写错只会让设备多跑几条幂等迁移，不会坏库；写小了才真出问题。
+    con.execute("pragma user_version = 4")
+    uv = con.execute("pragma user_version").fetchone()[0]
+    tables = sorted(r[0] for r in con.execute(
+        "select name from sqlite_master where type='table'"))
     con.commit()
     con.close()
-    print("  meta.db db_inode = %d" % ino)
+    print("  meta.db 收尾完成: user_version=%d tables=%s" % (uv, ",".join(tables)))
 except Exception as e:
-    print("  警告：写 db_inode 失败（%s），设备上会每次启动全量重建" % e)
+    print("  警告：meta.db 收尾失败（%s）—— 设备上可能卡在启用内核" % e)
 PYEOF
     else
-        log_warning "  没有 python3，跳过 db_inode 写入（会导致每次启动全量重建）"
+        log_warning "  没有 python3，跳过 meta.db 收尾（设备上可能卡在启用内核）"
     fi
 
     log_success "Fakefs rootfs created"

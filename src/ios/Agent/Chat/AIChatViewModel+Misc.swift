@@ -29,18 +29,23 @@ extension AIChatViewModel {
                     logger.info("[KernelBoot] kernel boot call: \(String(format: "%.1f", kernelElapsed))ms")
 
                     // [T-fakefs-rebuild-storm] -5 = -EIO，来自内核 fake_db_init
-                    // 打开 / 初始化 meta.db 失败。最常见的成因是上次
-                    // fakefs_rebuild 被打断，留下 paths_old / stats_old 残表，
-                    // 下次 `create table paths_old` 报「表已存在」。
+                    // 走 init_fail 退出。能走到那里的路径有：
+                    //   · 两条 pragma（journal_mode / foreign_keys）失败
+                    //   · 迁移之后任一条 db_*_checked 失败 —— 其中最典型的是
+                    //     `select inode from orphans` 找不到表（迁移被跳过）
+                    //   · `update meta set db_inode` 失败
                     //
-                    // 这不是数据损坏，只是两张临时表卡住了。清掉就能继续，
-                    // 用户数据（/root、/var/ai）一个字节都不用动 —— 比让用户
-                    // 看到「内核启动失败」然后重装整个 App 好太多。
+                    // 同一段代码还有另一条**不会**返回 -5 的失败路径，别搞混：
+                    // fakefs_rebuild 里的 create table paths_old / stats_old 走
+                    // EXEC 宏，失败时调 die()；iOS 上 die_handler 被换成
+                    // embedded_die_handler，只把 iSH 线程挂起、不让进程崩。
+                    // 那种情况表现为界面永远卡在「正在启用内核」，连错误都看不到。
                     //
-                    // 试一次就够：修完还失败说明是别的原因（真损坏、没空间），
-                    // 再重试只是浪费用户时间。
+                    // repairMetaDBIfNeeded() 三件事一起做（清残表 / 补 orphans /
+                    // 校准 db_inode），上面两条路径都能覆盖。修完重试一次：
+                    // 还失败说明是别的原因（真损坏、没空间），再试只是浪费时间。
                     if err == -5 {
-                        logger.warning("[KernelBoot] boot 返回 -5（meta.db EIO）— 尝试清残表后重试一次")
+                        logger.warning("[KernelBoot] boot 返回 -5（meta.db EIO）— 尝试修复 meta.db 后重试一次")
                         // isBooted 只有在 boot 全程成功末尾才置 YES；-5 来自
                         // mount_root → fake_db_init，位置在 become_first_process
                         // 之前，所以内核还是「没启动」的干净状态，可以重来。

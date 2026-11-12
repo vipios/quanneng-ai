@@ -416,6 +416,22 @@ class RootfsManager {
         // Unzip using custom ZIP reader
         try unzipFile(at: zipURL, to: rootfsPath)
 
+        // [T-fakefs-rebuild-storm] 解压完立刻校准 meta.db 的 db_inode。
+        //
+        // 这一步必须在 boot **之前**做，而且是解压之后的第一件事：
+        //   · 解压决定了 meta.db 最终的 st_ino，早于这里写的值都是错的
+        //   · 内核 fake_db_init 拿 meta.db 里存的 db_inode 跟文件自己的
+        //     st_ino 比，不等就调 fakefs_rebuild() 全表重建
+        //   · 包里的 db_inode 恒为 0（fakefsify 写的），真 inode 永不为 0，
+        //     所以不校准的话**每次首启都必然走一次全量重建**
+        //
+        // 全量重建本身不算错，但它是首启最脆弱的一段：几千条 fstatat 逐条走，
+        // 中途被系统杀掉就留下 paths_old/stats_old 残表。而 fakefs_rebuild
+        // 用的 EXEC 宏失败时调的是 die() —— 在 iOS 上 die_handler 被换成了
+        // 「把 iSH 线程永久挂起」，于是界面就永远停在「正在启用内核」。
+        // 让它一次都别重建，比事后补救可靠。
+        calibrateMetaDBInode()
+
         // Write architecture tag so we detect mismatches on future launches
         try currentArch.write(to: archTagPath, atomically: true, encoding: .utf8)
 
@@ -520,28 +536,42 @@ class RootfsManager {
         }
     }
 
-    /// 尝试修好 `meta.db` 里的 bug，让下一次 mount 能过。
+    /// 解压完成后校准 `meta.db`，让首启不触发全量重建。
     ///
-    /// [T-fakefs-rebuild-storm] 背景（2026-11-12 用户 1.77 首启
-    /// "Kernel boot failed: -5"）：
+    /// 这是 `recovery` 入口：不返回「改没改」，只保证做完该做的事并留日志。
+    /// 真正干活的是 `repairMetaDBIfNeeded()`。
+    private func calibrateMetaDBInode() {
+        let before = CFAbsoluteTimeGetCurrent()
+        let changed = repairMetaDBIfNeeded()
+        let elapsed = (CFAbsoluteTimeGetCurrent() - before) * 1000
+        logger.info("[Rootfs] meta.db calibrated after unzip (changed=\(changed)) "
+                    + "\(String(format: "%.1f", elapsed))ms")
+    }
+
+    /// 尝试修好 `meta.db`，让下一次 mount 能过。
+    ///
+    /// [T-fakefs-rebuild-storm] 背景（2026-11-12 用户 1.77 首启卡在「正在启用内核」）：
     ///
     /// 内核 `fake_db_init` 里有一段 inode 校验 —— 把 meta 表的 db_inode
     /// 跟 meta.db 文件自己的 st_ino 比，不等就调 `fakefs_rebuild()` 全表重建。
     /// 而 fakefsify 产出的 db_inode 是 **0**，真 inode 永远不是 0，
     /// 所以**每次启动都全量重建一次**。
     ///
-    /// `fakefs_rebuild` 的头几条 SQL 是：
-    ///     create table paths_old (...)
-    ///     create table stats_old (...)
-    /// 不带 if not exists。重建跑到一半被打断（用户等不及退出、系统杀进程），
-    /// 这两张残表就留在库里；下一次重建再执行 create 直接报
-    /// "table already exists" → `_EIO` → mount 返回 -5。
+    /// 全量重建的失败模式分两种，别搞混：
     ///
-    /// 修法很直接：删掉残表，顺便把 db_inode 写成真实值。
-    /// 这样下一次 mount 要么不重建、要么能完整重建，两条路都通。
+    ///   · `fakefs_rebuild` 头几条 DDL（create table paths_old / stats_old）
+    ///     走的是 `EXEC` 宏，失败时调 `die()`。iOS 上 `die_handler` 被换成
+    ///     `embedded_die_handler` —— 不 abort，而是把 iSH 线程永久挂起
+    ///     （select 睡死）。表现就是界面卡在「正在启用内核」，永远不出结果。
+    ///   · 重建能跑完、但后续某条 `db_*_checked` 失败，才会走 `init_fail`
+    ///     返回 `_EIO`（-5）。这一条要求重建本身先成功。
     ///
-    /// 注意：这里**不重建 data/ 目录树**。只是清两张临时表 + 改一个整数，
-    /// 用户数据一个字节都不动。所以可以安全地在 boot 失败后立即调用。
+    /// 所以「清残表 + 校准 db_inode」两个动作缺一不可：
+    ///   · 不校准 db_inode → 每次都重建，反复暴露在上面两条失败路径里
+    ///   · 不删残表 → 一旦真留下 paths_old，重建第一步就 die() 挂死
+    ///
+    /// 注意：这里**不重建 data/ 目录树**。只是清两张临时表 + 改一个整数 +
+    /// 补一张可能缺的表，用户数据一个字节都不动。
     @discardableResult
     func repairMetaDBIfNeeded() -> Bool {
         let metaDBPath = rootfsPath.appendingPathComponent("meta.db").path
@@ -554,6 +584,10 @@ class RootfsManager {
             return false
         }
         defer { sqlite3_close(db) }
+
+        // 失败自愈路径上，内核可能刚打开过这个库（boot 走到 mount 才失败），
+        // 残留的锁会让这里的 DDL 直接报 SQLITE_BUSY。等一会儿比立刻放弃好。
+        sqlite3_busy_timeout(db, 3000)
 
         var changed = false
         for table in ["paths_old", "stats_old"] {
@@ -578,10 +612,42 @@ class RootfsManager {
             }
         }
 
+        // ── 保证 `orphans` 表存在 ──
+        //
+        // 内核 fake_db_init 在迁移**之后**无条件执行：
+        //     delete from stats where inode in (select inode from orphans) ...
+        //     delete from orphans
+        // 只要这张表不存在，这两条就必然失败 → goto init_fail → 返回 _EIO(-5)。
+        //
+        // 正常情况下 migrations[3]（v3→v4）会建它。但有两种情况建不到：
+        //   · user_version 已经是 4（迁移被跳过）而表偏偏不存在
+        //   · 库是从别处拷来的半成品
+        // 先建一张空表把它们兜住，成本为零 —— 空表让那两条 delete 变成空操作。
+        var orphansProbe: OpaquePointer?
+        var hasOrphans = false
+        if sqlite3_prepare_v2(db,
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='orphans'",
+            -1, &orphansProbe, nil) == SQLITE_OK, let orphansProbe {
+            hasOrphans = sqlite3_step(orphansProbe) == SQLITE_ROW
+            sqlite3_finalize(orphansProbe)
+        }
+        if !hasOrphans {
+            if sqlite3_exec(db, "CREATE TABLE IF NOT EXISTS orphans (inode integer primary key)",
+                            nil, nil, nil) == SQLITE_OK {
+                changed = true
+                logger.warning("[Rootfs] repairMetaDB: 补建 orphans 表（内核挂载时无条件查它）")
+            } else {
+                logger.error("[Rootfs] repairMetaDB: 建 orphans 失败 — \(String(cString: sqlite3_errmsg(db)))")
+            }
+        }
+
         // 把 db_inode 写成 meta.db 自己的 st_ino。
-        // 解压后 inode 变过，所以这个值下次启动一定又对不上、还要重建一次 ——
-        // 但那时候重建表是干净的，能跑完。跑完之后内核自己会把 db_inode
-        // 更新成当时的正确值，此后就不再重建了。
+        //
+        // 这里写的值在**解压之后**读，所以和内核 mount 时看到的 st_ino 一致 ——
+        // 首启就不会再走 fakefs_rebuild 那条脆弱路径。
+        //
+        // 注意：进程重启后 st_ino 不会变（APFS 里 inode 号稳定，解压才变），
+        // 所以这个值能一直有效，不是「只管一次」。
         //
         // 用 stat(2) 而不是 attributesOfItem：后者拿 [.systemFileNumber] 是走
         // FileAttributeKey → NSNumber → UInt64 的桥接，出错时静默得 0
