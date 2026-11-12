@@ -296,10 +296,12 @@ jobs:
         with:
           path: deps/resources/alpine-rootfs.zip
           # key 里带 STAMP_SCHEMA：构建脚本只要改动「会进 zip 的内容」就必须升，
-          # 否则命中旧缓存 → 脚本整个不跑 → 新加的版本戳写不进去 →
-          # 设备端 `bundleRootfsStamp()` 返回 nil → 版本检查被静默跳过。
+          # 否则命中旧缓存 → 脚本整个不跑 → 改动静默失效，CI 全绿但用户收不到。
           # v6：新增 data/etc/quanneng-rootfs-version 版本戳（1.73 修复）
-          key: rootfs-alpine-v8-orphans
+          # v7：db_inode 校准（1.77，方向错了，已废弃）
+          # v8：清残表 + 补 orphans + 推 uv=4（1.78，漏了 uv 一致性）
+          # v9：meta.db 直接构造内核迁移终态（uv 必须正好 4）+ 自检改严
+          key: rootfs-alpine-v9-terminal
 
       # ── 4. 构建原生依赖 ──
       # 顺序有依赖关系，不能并行也不能调换：
@@ -408,13 +410,22 @@ jobs:
           # 所以「缓存命中但没有戳」必须当成未命中，强制重建。
           #
           # [STAMP-GUARD-2] 光有戳还不够，还要查 meta.db 的健康状态。
-          # 1.77 首启卡在「正在启用内核」，根因在这一层：
-          #   · paths_old / stats_old 残表 → 设备上第一次 fakefs_rebuild
-          #     在 create 处 die()，iOS 的 die_handler 只挂起线程不崩进程，
-          #     界面就永远卡住
-          #   · user_version 落后 → 迁移要跑，迁移里任何一步出错同样致命
-          #   · 缺 orphans 表 → fake_db_init 迁移后无条件查它，失败即
-          #     init_fail → 返回 _EIO(-5)
+          # 1.77 首启卡在「正在启用内核」、1.78 报 -5，两次根因都在这层。
+          #
+          # [STAMP-GUARD-3] 从「查表名」升级成「按内核的判定方式实跑一遍」。
+          #
+          # 前两版只查「表在不在 / uv 够不够」，结果漏掉了真正致命的东西：
+          # 内核 `fakefs_migrate` 里 migrations[2] 是 `drop trigger delete_path`、
+          # migrations[3] 是 `create table orphans` —— 这两条**都不带
+          # if [not] exists**，且走 `EXEC` 宏，失败就 die()。iOS 上
+          # die_handler 只把线程睡死，界面永远卡在「正在启用内核」。
+          # 所以「uv 停在 3、而目标对象已是迁移想要的状态」这个组合必须拦住。
+          #
+          # 现在查四件事：
+          #   1. uv 必须正好是 4（少于 4 设备要跑非幂等 DDL，可能 die）
+          #   2. 不能有 paths_old / stats_old / paths_new 残表
+          #   3. orphans 表必须在（fake_db_init 迁移后无条件查它）
+          #   4. 内核 init 里那条 orphan 清理语句必须能 prepare 成功
           #
           # 注意**不要**在这里检查 db_inode：包里那个值注定对不上设备上的
           # 真实 inode（解压必变），App 侧解压后会自己校准。
@@ -426,22 +437,57 @@ jobs:
               con = sqlite3.connect(sys.argv[1])
               names = {r[0] for r in con.execute(
                   "select name from sqlite_master where type='table'")}
-              residue = names & {"paths_old", "stats_old"}
+              residue = names & {"paths_old", "stats_old", "paths_new"}
+              triggers = {r[0] for r in con.execute(
+                  "select name from sqlite_master where type='trigger'")}
               uv = con.execute("pragma user_version").fetchone()[0]
-              con.close()
           except Exception as e:
               print("  meta.db 读不动: %s" % e)
               sys.exit(1)
+
           ok = True
+          if uv != 4:
+              if uv < 4:
+                  print("  !! user_version=%d，设备上要跑迁移；"
+                        "migrations[2]/[3] 都不幂等，可能 die() 卡死" % uv)
+              else:
+                  print("  !! user_version=%d 比内核的 4 还新，"
+                        "表结构可能对不上" % uv)
+              ok = False
           if residue:
-              print("  !! 残表: %s（设备上第一次重建会 die()）" % ",".join(sorted(residue)))
+              print("  !! 残表: %s（不带 if exists，设备上会 die()）"
+                    % ",".join(sorted(residue)))
+              ok = False
+          if triggers:
+              # migrations[2] 就是 `drop trigger delete_path`：终态里不该有
+              # 任何 trigger。它在会改变删除语义，和 orphans 的延迟清理打架。
+              print("  !! 残留 trigger: %s（migrations[2] 本该删掉它）"
+                    % ",".join(sorted(triggers)))
               ok = False
           if "orphans" not in names:
               print("  !! 缺 orphans 表（fake_db_init 会 init_fail 返回 -5）")
               ok = False
-          if uv < 4:
-              print("  !! user_version=%d，设备上要跑迁移" % uv)
-              ok = False
+          for t in ("meta", "paths", "stats"):
+              if t not in names:
+                  print("  !! 缺核心表 %s" % t)
+                  ok = False
+
+          # 按内核的方式把关键语句 prepare 一遍。把 ? 换 NULL 只为
+          # 绕开 Python 的绑定检查，语义等价（内核自己负责 bind）。
+          for label, sql in [
+              ("journal_mode=wal", "pragma journal_mode=wal"),
+              ("orphan sweep",
+               "delete from stats where inode in (select inode from orphans) "
+               "and not exists (select 1 from paths where inode = stats.inode)"),
+              ("delete orphans", "delete from orphans"),
+          ]:
+              try:
+                  con.execute("EXPLAIN " + sql.replace("?", "NULL"))
+              except Exception as e:
+                  print("  !! %s 过不了: %s" % (label, e))
+                  ok = False
+
+          con.close()
           if ok:
               print("  meta.db ok: uv=%d tables=%s" % (uv, ",".join(sorted(names))))
           sys.exit(0 if ok else 1)
@@ -458,15 +504,15 @@ jobs:
           }
 
           if check_rootfs; then
-            echo "rootfs 缓存有效（有版本戳 + meta.db 干净），跳过重建"
+            echo "rootfs 缓存有效（版本戳 + meta.db 处于内核迁移终态），跳过重建"
             ls -la deps/resources/alpine-rootfs.zip
           else
-            echo "::warning::缓存的 rootfs 不可用（缺版本戳 / 有残表 / 缺 orphans / user_version 落后），作废并重建"
+            echo "::warning::缓存的 rootfs 不可用（uv 不对 / 有残表 / 缺表 / 关键 SQL 过不了），作废并重建"
             rm -f deps/resources/alpine-rootfs.zip
             ./deps/prepare_alpine_rootfs.sh
           fi
 
-          # 重建后必须确认两项都真的写进去了，否则这一轮的 ipa 白出。
+          # 重建后必须确认都真的写进去了，否则这一轮的 ipa 白出。
           echo "── rootfs 自检 ──"
           echo -n "  版本戳: "
           unzip -p deps/resources/alpine-rootfs.zip \
@@ -475,7 +521,9 @@ jobs:
           echo ""
           rm -rf /tmp/rootfs-check && mkdir -p /tmp/rootfs-check
           unzip -q -o deps/resources/alpine-rootfs.zip alpine-rootfs/meta.db -d /tmp/rootfs-check
-          python3 /tmp/check_rootfs.py /tmp/rootfs-check/alpine-rootfs/meta.db || true
+          # ★ 这里不能 || true。前两轮失败正是因为自检只警告不失败，
+          # 坏 rootfs 一路打进 ipa 发给了用户。
+          python3 /tmp/check_rootfs.py /tmp/rootfs-check/alpine-rootfs/meta.db
 
       - name: Save rootfs cache
         if: success()
@@ -483,7 +531,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: deps/resources/alpine-rootfs.zip
-          key: rootfs-alpine-v8-orphans
+          key: rootfs-alpine-v9-terminal
 
       - name: Build rclone
         if: steps.c_rclone.outputs.cache-hit != 'true'

@@ -46,18 +46,78 @@ extension AIChatView {
             }
             .transition(.opacity)
         case .failed(let msg):
+            // [T-kernel-fail-selfservice] 这个界面以前只有一行红字，用户除了
+            // 卸载重装没别的路 —— 而 -5 反复出现时，卸载重装恰好也解决不了
+            // （重装后解压出的 rootfs 又会被同一处逻辑弄坏）。
+            //
+            // 现在给两个出口：
+            //   · 重试 —— 先修库（把 meta.db 拉回内核迁移终态）再 boot 一次
+            //   · 重置 —— 删掉 rootfs 重装（保留 ~ 和 /var/ai 里的用户数据）
+            // 两个都做成幂等，点几次都安全。
             ZStack {
                 ChatColors.background
                     .ignoresSafeArea()
-                VStack(spacing: 12) {
-                    Image(systemName: "exclamationmark.circle.fill")
-                        .font(.title2)
-                        .foregroundStyle(.red)
-                    Text(msg)
-                        .font(.subheadline)
-                        .foregroundStyle(.red)
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal, 40)
+                ScrollView {
+                    VStack(spacing: 14) {
+                        Image(systemName: "exclamationmark.circle.fill")
+                            .font(.title2)
+                            .foregroundStyle(.red)
+
+                        // 诊断信息可能很长（尤其 -5 会带一整套快照），
+                        // 让它能滚、能选中复制。
+                        Text(msg)
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                            .multilineTextAlignment(.center)
+                            .textSelection(.enabled)
+                            .padding(.horizontal, 28)
+                            .padding(.top, 2)
+
+                        if vm.kernelRepairing {
+                            HStack(spacing: 8) {
+                                ProgressView()
+                                Text("正在修复…")
+                                    .font(.footnote)
+                                    .foregroundStyle(ChatColors.secondaryText)
+                            }
+                            .padding(.top, 6)
+                        } else {
+                            VStack(spacing: 10) {
+                                Button {
+                                    vm.repairAndRetryKernelBoot()
+                                } label: {
+                                    Text("修复并重试")
+                                        .font(.subheadline.weight(.medium))
+                                        .frame(maxWidth: .infinity)
+                                        .padding(.vertical, 11)
+                                        .background(Color.accentColor.opacity(0.14))
+                                        .foregroundStyle(Color.accentColor)
+                                        .clipShape(RoundedRectangle(cornerRadius: 10))
+                                }
+
+                                Button {
+                                    vm.resetKernelEnvironment()
+                                } label: {
+                                    Text("重置内核环境（保留用户数据）")
+                                        .font(.subheadline.weight(.medium))
+                                        .frame(maxWidth: .infinity)
+                                        .padding(.vertical, 11)
+                                        .background(Color.red.opacity(0.12))
+                                        .foregroundStyle(.red)
+                                        .clipShape(RoundedRectangle(cornerRadius: 10))
+                                }
+
+                                Text("重置会重新解压 rootfs，~ 和 /var/ai 里的文件会保留；完成后需要重启 App。")
+                                    .font(.caption2)
+                                    .foregroundStyle(ChatColors.tertiaryText)
+                                    .multilineTextAlignment(.center)
+                            }
+                            .padding(.horizontal, 28)
+                            .padding(.top, 6)
+                        }
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 40)
                 }
             }
             .transition(.opacity)

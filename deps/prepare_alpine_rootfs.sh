@@ -32,6 +32,16 @@ ALPINE_MINOR="0"
 ALPINE_ARCH="aarch64"  # ARM64 for iSH-ARM64 emulation
 ALPINE_MIRROR="https://dl-cdn.alpinelinux.org/alpine"
 
+# ★★ rootfs 配方版本号 —— 改这个脚本的产物就必须 +1 ★★
+#
+# 这个数字进「工具链版本戳」，是 App 侧决定「要不要重装 rootfs」的依据之一。
+# 不 +1 的后果：设备上那份 rootfs 不会被替换，你对产物做的一切改动
+# 都不会到用户手上，而 CI 全绿、日志看着全对（1.77→1.78 踩过）。
+#
+#   1 — 初版（T-rootfs-never-updated）
+#   2 — meta.db 直接构造内核迁移终态（T-meta-terminal-state）
+ROOTFS_RECIPE_VERSION=2
+
 # [R58-预装工具链] 国内镜像优先。
 #
 # dl-cdn.alpinelinux.org 在国内经常几十 KB/s，一次要拉 100+ 个包，
@@ -196,9 +206,9 @@ create_fakefs() {
         log_error "Failed to create fakefs rootfs"
     fi
 
-    # ── meta.db 收尾：清残表 / 补 orphans / 对齐 schema ──
+    # ── meta.db 收尾：直接构造内核迁移终态 ──
     #
-    # [T-fakefs-rebuild-storm] 这一段只做「让包里的 meta.db 处于干净可用状态」，
+    # [T-meta-terminal-state] 这一段只做「让包里的 meta.db 处于干净可用状态」，
     # **不写 db_inode**。原因：db_inode 存的是 meta.db 文件自己的 st_ino，
     # 而这个包要经过 zip 压缩 → 传到设备 → 解压，解压后 inode 必然全变。
     # 在这里写什么值都注定对不上，写了等于没写。
@@ -206,16 +216,17 @@ create_fakefs() {
     # 真正的 db_inode 校准放在 App 侧：`RootfsManager.repairMetaDBIfNeeded()`
     # 在解压完成后立刻按设备上的真实 st_ino 改写，那才是唯一有效的位置。
     #
-    # 这里负责三件事：
-    #   1. 删掉 paths_old / stats_old —— fakefs_rebuild 的临时表，不带
-    #      if not exists。留着就会让设备上第一次重建在 create 处 die()，
-    #      而 iOS 的 die_handler 只挂起线程不崩进程，界面就永远卡在
-    #      「正在启用内核」。这是最难查的一类卡死，必须在源头清掉。
-    #   2. 补建 orphans 表 —— fake_db_init 在迁移之后**无条件**执行
-    #      `delete from stats where inode in (select inode from orphans)`。
-    #      user_version 已经是 4 而表偏偏不存在时，这条直接失败 →
-    #      init_fail → 返回 _EIO(-5)。补一张空表，成本为零。
-    #   3. 把 user_version 推到最新 —— 让设备上的迁移循环一条都不用跑。
+    # ★ 这里的 SQL 必须与 App 侧 `repairMetaDBIfNeeded()` 保持一致 ——
+    #   两边都照着 `fs/fake-migrate.c` 的 migrations[0..3] 构造终态。
+    #
+    # 为什么必须「构造终态」而不是「零散补漏」：
+    #   内核迁移里 migrations[2] 是 `drop trigger delete_path`（无 if exists）、
+    #   migrations[3] 是 `create table orphans`（无 if not exists）。
+    #   这两条都走 EXEC 宏，失败就 die()，iOS 上表现为界面永久卡在
+    #   「正在启用内核」。所以只要 user_version 停在 3、而目标对象已经
+    #   处于该迁移**想**造出来的状态，就是必死组合。
+    #   唯一稳妥的办法：把 4 条迁移的效果全部做出来，再把 uv 推到 4，
+    #   让设备上那 4 条非幂等 DDL 一次都不执行。
     #
     # 用 python3 而不是 sqlite3 命令行：macOS runner 默认只有 sqlite 库，
     # 没有 sqlite3 这个可执行文件（brew 里是另一份，没装）。
@@ -224,22 +235,54 @@ create_fakefs() {
 import sqlite3, sys
 root = sys.argv[1]
 db = root + "/meta.db"
+
+# 与 fs/fake-migrate.c 的 migrations[0..3] 终态一一对应。
+# 全部幂等，重复执行无副作用。
+STEPS = [
+    ("drop trigger delete_path",  "drop trigger if exists delete_path"),
+    ("drop paths_new",            "drop table if exists paths_new"),
+    # 重建过程留下的临时表：不带 if not exists，留着会让设备 die()
+    ("drop paths_old",            "drop table if exists paths_old"),
+    ("drop stats_old",            "drop table if exists stats_old"),
+    ("index inode_to_path",
+     "create index if not exists inode_to_path on paths (inode, path)"),
+    ("table orphans",
+     "create table if not exists orphans (inode integer primary key)"),
+    # 内核 migrations[3] 的那次全表 sweep
+    ("sweep orphan stats",
+     "delete from stats where not exists (select 1 from paths where inode = stats.inode)"),
+]
+
 try:
     con = sqlite3.connect(db)
     con.isolation_level = None
-    con.execute("drop table if exists paths_old")
-    con.execute("drop table if exists stats_old")
-    con.execute("create table if not exists orphans (inode integer primary key)")
-    # 内核 fakefs_migrate 的 migrations 数组长度就是当前 schema 版本。
-    # 对齐到 4（v1 索引 / v2 外键+trigger / v3 删 trigger / v4 orphans）。
-    # 写错只会让设备多跑几条幂等迁移，不会坏库；写小了才真出问题。
+
+    uv_before = con.execute("pragma user_version").fetchone()[0]
+    bad = []
+    for label, sql in STEPS:
+        try:
+            con.execute(sql).fetchall()
+        except Exception as e:
+            bad.append("%s: %s" % (label, e))
+
+    # 4 条迁移的效果都做完了，推 uv 才安全。
+    # 这个数字必须等于 len(migrations)：写小了设备要跑非幂等 DDL（可能 die），
+    # 写大了设备直接跳过（但表结构可能没到位）。
+    # 目前 fs/fake-migrate.c 里是 4 条，改那边必须同步改这里。
     con.execute("pragma user_version = 4")
+
     uv = con.execute("pragma user_version").fetchone()[0]
     tables = sorted(r[0] for r in con.execute(
         "select name from sqlite_master where type='table'"))
+    trig = [r[0] for r in con.execute(
+        "select name from sqlite_master where type='trigger'")]
     con.commit()
     con.close()
-    print("  meta.db 收尾完成: user_version=%d tables=%s" % (uv, ",".join(tables)))
+
+    if bad:
+        print("  警告：以下步骤失败 —— %s" % "; ".join(bad))
+    print("  meta.db 收尾完成: user_version %d -> %d, tables=%s, trigger=%s"
+          % (uv_before, uv, ",".join(tables), ",".join(trig) if trig else "无"))
 except Exception as e:
     print("  警告：meta.db 收尾失败（%s）—— 设备上可能卡在启用内核" % e)
 PYEOF
@@ -356,10 +399,24 @@ EOF
     # 说没装，`ls /usr/bin | grep ^dpkg` 一个都没有。查 CI 日志怎么查都对不上，
     # 因为 CI 打的那 78 个包里明明有 dpkg —— 那份 rootfs 根本没被用上。
     #
-    # 戳的内容：Alpine 版本 + 预装包清单的 sha256 前 16 位。
-    # 为什么用「包清单指纹」而不是时间戳：时间戳每次构建都变，会让所有
-    # 用户每次升级都重装 rootfs（几十秒 + 丢缓存）；包清单不变时指纹不变，
-    # 只有真的改了工具链才触发重装，这才是正确的粒度。
+    # 戳的内容：Alpine 版本 + 预装包清单的 sha256 前 16 位 + 配方版本号。
+    #
+    # ★ 为什么还要一个「配方版本号」（ROOTFS_RECIPE_VERSION）——
+    #
+    # 上面那段说「包清单不变时指纹不变」是对的，但它漏掉了一半：
+    # **这份 rootfs 的产物不只由包清单决定**。准备脚本本身（解包顺序、
+    # meta.db 收尾、overlay 文件、profile 内容……）变了，产物就变了，
+    # 可指纹纹丝不动。
+    #
+    # 1.77 → 1.78 就是这么栽的：1.78 把 meta.db 的收尾逻辑改写了一遍，
+    # 但没动 PRESEED_PACKAGES，戳一字不差 → `toolchainVersionMatches`
+    # 返回 true → `isInstalled` 为 true → `installIfNeeded()` 直接 return
+    # → **设备上那份 rootfs 根本没被替换**，构建期做的一切都没到用户手上。
+    # 用户看到的当然是「改了还是 -5」。
+    #
+    # 所以规矩定死：**只要 prepare_alpine_rootfs.sh 的产物逻辑有任何改动，
+    # 必须手动把 ROOTFS_RECIPE_VERSION 加一。** 这是唯一可靠的办法 ——
+    # 脚本没法定制「我自己变了没有」，只能靠人守这条纪律。
     #
     # 用 shasum -a 256 而不是 sha256sum：CI 跑在 macos runner 上，
     # 那里没有 GNU coreutils 的 sha256sum。shasum 是 macOS 自带的 perl 脚本，
@@ -372,7 +429,7 @@ EOF
     fi
     local pkg_fingerprint
     pkg_fingerprint=$(printf '%s\n' "${PRESEED_PACKAGES[@]}" | sort | $hash_cmd | cut -c1-16)
-    local stamp="${ALPINE_VERSION}.${ALPINE_MINOR}-${pkg_fingerprint}"
+    local stamp="${ALPINE_VERSION}.${ALPINE_MINOR}-r${ROOTFS_RECIPE_VERSION}-${pkg_fingerprint}"
 
     printf '%s\n' "$stamp" > "$ROOTFS_DATA/etc/quanneng-rootfs-version"
     log_info "  rootfs 版本戳：$stamp"

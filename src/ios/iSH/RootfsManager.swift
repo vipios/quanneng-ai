@@ -548,30 +548,27 @@ class RootfsManager {
                     + "\(String(format: "%.1f", elapsed))ms")
     }
 
-    /// 尝试修好 `meta.db`，让下一次 mount 能过。
+    /// 把 `meta.db` 幂等地**直接构造成「内核迁移全部跑完」的终态**。
     ///
-    /// [T-fakefs-rebuild-storm] 背景（2026-11-12 用户 1.77 首启卡在「正在启用内核」）：
+    /// [T-meta-terminal-state] 为什么不再「零散补漏」——
     ///
-    /// 内核 `fake_db_init` 里有一段 inode 校验 —— 把 meta 表的 db_inode
-    /// 跟 meta.db 文件自己的 st_ino 比，不等就调 `fakefs_rebuild()` 全表重建。
-    /// 而 fakefsify 产出的 db_inode 是 **0**，真 inode 永远不是 0，
-    /// 所以**每次启动都全量重建一次**。
+    /// 1.78 的做法是「补 orphans 表 + 清残表 + 校准 db_inode」，三件事各管一段。
+    /// 它在设备上留下了一个**必死组合**：`orphans` 补上了，但 `user_version`
+    /// 还是 3。内核 `fakefs_migrate` 接着跑 `migrations[3]`，那条 SQL 是
+    /// `create table orphans (...)` —— **没有 `if not exists`**，撞车后走
+    /// `EXEC` 宏调 `die()`；iOS 上 `die_handler` 是 `embedded_die_handler`，
+    /// 只把 iSH 线程永久睡死，于是界面永远停在「正在启用内核」。
     ///
-    /// 全量重建的失败模式分两种，别搞混：
+    /// 也就是说：**修的每一处都必须让整个库离内核期望的终态更近一步，
+    /// 而不是只在某一段自洽。** 现在的做法是照着 `fs/fake-migrate.c` 把
+    /// migrations[0..3] 的最终效果一次性构造出来，然后直接把
+    /// `user_version` 推到 4 —— 内核看到 4 就整段跳过，那些非幂等 DDL
+    /// 一次都不会执行。
     ///
-    ///   · `fakefs_rebuild` 头几条 DDL（create table paths_old / stats_old）
-    ///     走的是 `EXEC` 宏，失败时调 `die()`。iOS 上 `die_handler` 被换成
-    ///     `embedded_die_handler` —— 不 abort，而是把 iSH 线程永久挂起
-    ///     （select 睡死）。表现就是界面卡在「正在启用内核」，永远不出结果。
-    ///   · 重建能跑完、但后续某条 `db_*_checked` 失败，才会走 `init_fail`
-    ///     返回 `_EIO`（-5）。这一条要求重建本身先成功。
+    /// 每一步都是 `if [not] exists` 形式，重复调用无副作用（已实测三遍）。
     ///
-    /// 所以「清残表 + 校准 db_inode」两个动作缺一不可：
-    ///   · 不校准 db_inode → 每次都重建，反复暴露在上面两条失败路径里
-    ///   · 不删残表 → 一旦真留下 paths_old，重建第一步就 die() 挂死
-    ///
-    /// 注意：这里**不重建 data/ 目录树**。只是清两张临时表 + 改一个整数 +
-    /// 补一张可能缺的表，用户数据一个字节都不动。
+    /// 注意：这里**不重建 data/ 目录树**，用户数据一个字节都不动。
+    /// 只碰 meta.db 里的表结构和几个整数。
     @discardableResult
     func repairMetaDBIfNeeded() -> Bool {
         let metaDBPath = rootfsPath.appendingPathComponent("meta.db").path
@@ -590,54 +587,77 @@ class RootfsManager {
         sqlite3_busy_timeout(db, 3000)
 
         var changed = false
-        for table in ["paths_old", "stats_old"] {
-            // DROP TABLE IF EXISTS 对不存在的表也返回 OK，所以不能靠返回值
-            // 判断「有没有真的删掉」。先查 sqlite_master 确认它存在。
-            var probe: OpaquePointer?
-            var existed = false
-            if sqlite3_prepare_v2(db,
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
-                -1, &probe, nil) == SQLITE_OK, let probe {
-                sqlite3_bind_text(probe, 1, table, -1, Self.SQLITE_TRANSIENT)
-                existed = sqlite3_step(probe) == SQLITE_ROW
-                sqlite3_finalize(probe)
+
+        // 先读 user_version。它决定「要不要做全表 sweep」——
+        // uv 已经是 4 说明内核迁移早跑完了，orphans 增量清理已经接管，
+        // 没必要每次启动都扫一遍 stats（内核注释里量过：1.5M 行约 0.3s）。
+        var uvBefore = -1
+        var uvStmt: OpaquePointer?
+        if sqlite3_prepare_v2(db, "PRAGMA user_version", -1, &uvStmt, nil) == SQLITE_OK,
+           let uvStmt {
+            if sqlite3_step(uvStmt) == SQLITE_ROW {
+                uvBefore = sqlite3_column_int(uvStmt, 0)
             }
-            if existed {
-                if sqlite3_exec(db, "DROP TABLE IF EXISTS \(table)", nil, nil, nil) == SQLITE_OK {
-                    changed = true
-                    logger.warning("[Rootfs] repairMetaDB: 删掉残表 \(table)")
-                } else {
-                    logger.error("[Rootfs] repairMetaDB: 删 \(table) 失败 — \(String(cString: sqlite3_errmsg(db)))")
-                }
+            sqlite3_finalize(uvStmt)
+        }
+
+        // ── 1. 按 `fs/fake-migrate.c` 的 migrations[0..3] 构造终态 ──
+        //
+        // 逐条对应内核那四条迁移的**最终效果**（不是它们的 SQL 原文）：
+        //   migrations[0] → 有 index inode_to_path
+        //   migrations[1] → 有 index、paths_new 只是中转表（跑完已 rename 掉）
+        //   migrations[2] → 建了 trigger 又删掉，终态是**没有** trigger
+        //   migrations[3] → 有 orphans 表 + 一次全表 sweep
+        //
+        // 全部写成幂等形式，重复调用无副作用。
+        var terminalSteps: [(label: String, sql: String)] = [
+            ("drop trigger delete_path", "DROP TRIGGER IF EXISTS delete_path"),
+            ("drop paths_new",           "DROP TABLE IF EXISTS paths_new"),
+            ("drop paths_old",           "DROP TABLE IF EXISTS paths_old"),
+            ("drop stats_old",           "DROP TABLE IF EXISTS stats_old"),
+            ("index inode_to_path",
+             "CREATE INDEX IF NOT EXISTS inode_to_path ON paths (inode, path)"),
+            ("table orphans",
+             "CREATE TABLE IF NOT EXISTS orphans (inode integer primary key)"),
+        ]
+        if uvBefore < 4 {
+            // 只有真正从 v3 及更早升上来才需要这一次 sweep。
+            terminalSteps.append(
+                ("sweep orphan stats",
+                 "DELETE FROM stats WHERE NOT EXISTS "
+                 + "(SELECT 1 FROM paths WHERE inode = stats.inode)"))
+        }
+        for step in terminalSteps {
+            if sqlite3_exec(db, step.sql, nil, nil, nil) != SQLITE_OK {
+                // 不直接 return —— 能修的继续修，最后靠 uv 是否推上去判定。
+                logger.error("[Rootfs] repairMetaDB: \(step.label) 失败 — "
+                             + String(cString: sqlite3_errmsg(db)))
             }
         }
 
-        // ── 保证 `orphans` 表存在 ──
+        // ── 2. 把 `user_version` 推到 4 ──
         //
-        // 内核 fake_db_init 在迁移**之后**无条件执行：
-        //     delete from stats where inode in (select inode from orphans) ...
-        //     delete from orphans
-        // 只要这张表不存在，这两条就必然失败 → goto init_fail → 返回 _EIO(-5)。
+        // ★ 这一步是整段的关键，绝不能省。
         //
-        // 正常情况下 migrations[3]（v3→v4）会建它。但有两种情况建不到：
-        //   · user_version 已经是 4（迁移被跳过）而表偏偏不存在
-        //   · 库是从别处拷来的半成品
-        // 先建一张空表把它们兜住，成本为零 —— 空表让那两条 delete 变成空操作。
-        var orphansProbe: OpaquePointer?
-        var hasOrphans = false
-        if sqlite3_prepare_v2(db,
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='orphans'",
-            -1, &orphansProbe, nil) == SQLITE_OK, let orphansProbe {
-            hasOrphans = sqlite3_step(orphansProbe) == SQLITE_ROW
-            sqlite3_finalize(orphansProbe)
-        }
-        if !hasOrphans {
-            if sqlite3_exec(db, "CREATE TABLE IF NOT EXISTS orphans (inode integer primary key)",
-                            nil, nil, nil) == SQLITE_OK {
+        // 内核 `fakefs_migrate` 是 `while (version < 4) EXEC(migrations[version])`，
+        // 其中 migrations[2] 是 `drop trigger delete_path`（无 if exists）、
+        // migrations[3] 是 `create table orphans`（无 if not exists）。
+        // 只要 uv 停在 3、而上面任何一项已经是目标状态，内核就会在
+        // `EXEC` 宏里 die() —— iOS 上表现为界面永久卡「正在启用内核」。
+        //
+        // 1.78 就是漏了这一步：补了 orphans 但不升 uv，等于亲手造出
+        // 「uv=3 + orphans 已存在」这个必死组合（已用真实 meta.db 复现）。
+        //
+        // 上面已经把这 4 条迁移的效果全做完了，所以这里推 uv 完全安全 ——
+        // 推到 4 之后内核整段跳过，那些非幂等 DDL 一次都不执行。
+        if uvBefore != 4 {
+            if sqlite3_exec(db, "PRAGMA user_version = 4", nil, nil, nil) == SQLITE_OK {
                 changed = true
-                logger.warning("[Rootfs] repairMetaDB: 补建 orphans 表（内核挂载时无条件查它）")
+                logger.warning("[Rootfs] repairMetaDB: user_version \(uvBefore) → 4"
+                               + "（内核据此跳过那 4 条非幂等迁移）")
             } else {
-                logger.error("[Rootfs] repairMetaDB: 建 orphans 失败 — \(String(cString: sqlite3_errmsg(db)))")
+                logger.error("[Rootfs] repairMetaDB: 写 user_version 失败 — "
+                             + String(cString: sqlite3_errmsg(db)))
             }
         }
 
@@ -680,6 +700,184 @@ class RootfsManager {
 
         logger.info("[Rootfs] repairMetaDB done (changed=\(changed))")
         return changed
+    }
+
+    /// 内核 mount 返回 -5（-EIO）时，把「凭什么 -5」查清楚。
+    ///
+    /// [T-boot-minus5-diagnose] 两轮修复都因为「不知道 -5 具体从哪来」而打偏。
+    /// `-5` 在 `fakefs_mount` 里有三条来源，必须能分开：
+    ///
+    ///   1. `realfs.mount()` —— host 的 `data/` 目录本身打不开
+    ///      （`realpath` 或 `open(O_DIRECTORY)` 失败，errno=EIO）
+    ///   2. `fake_db_init()` 的 `init_fail` —— meta.db 层面的 SQLite 错误
+    ///   3. `mount_root` 里 `realpath(source)` 失败 —— 目录不存在
+    ///
+    /// `errno_map()` 里有 `ERRCASE(EIO)`，所以 host 层 errno=EIO 会原样变成 -5。
+    ///
+    /// 这三条的处理办法完全不同：1 和 3 只能重装 rootfs，2 才是修库。
+    /// 之前一律按 2 修，所以用户一直看到同一个 -5。
+    ///
+    /// 返回值的最后一段是「结论 + 该怎么办」，直接进错误提示，
+    /// 用户截图就能带回来，不用专门导日志。
+    func diagnoseKernelMountFailure() -> String {
+        let fm = FileManager.default
+        var facts: [String] = []
+        var verdict: String? = nil
+
+        // ── 1. 目录本身（对应来源 1 和 3）──
+        let dataPathStr = dataPath.path
+        var isDir: ObjCBool = false
+        let dataExists = fm.fileExists(atPath: dataPathStr, isDirectory: &isDir)
+
+        if !dataExists {
+            facts.append("data/ 不存在")
+            verdict = "rootfs 目录没了 → 需要在下面「重置内核环境」重装"
+        } else if !isDir.boolValue {
+            facts.append("data/ 不是目录")
+            verdict = "data/ 被换成了文件 → 需要重置重装"
+        } else {
+            // open(O_DIRECTORY) 能不能成 —— 这是 realfs.mount 的真实动作。
+            // 注意内核对 errno 的处理：ENOENT 会变成 -2 而不是 -5，只有
+            // 真正 EIO 才是 -5，所以这里把 errno 原样报出来。
+            let fd = open(dataPathStr, O_RDONLY | O_DIRECTORY)
+            if fd >= 0 {
+                close(fd)
+                facts.append("data/ 可打开")
+            } else {
+                let e = errno
+                facts.append("data/ 打不开 errno=\(e)")
+                verdict = "目录在但打不开（errno=\(e)）→ 重装"
+            }
+        }
+
+        // ── 2. 磁盘空间 ──
+        // 磁盘满是最能解释「改了多少版都一样」的原因：SQLite 写 WAL、
+        // open(O_DIRECTORY) 都可能直接返回 EIO → -5。
+        if let attrs = try? fm.attributesOfFileSystem(forPath: rootfsPath.path),
+           let free = attrs[.systemFreeSize] as? NSNumber {
+            let freeMB = free.int64Value / (1024 * 1024)
+            facts.append("剩余 \(freeMB)MB")
+            if freeMB < 200 && verdict == nil {
+                verdict = "磁盘只剩 \(freeMB)MB → 先清空间"
+            }
+        }
+
+        // 顺带把遗留的 .alpine-rootfs-broken-* 数量报出来 —— 每份约 145MB，
+        // 累积几份就够把盘吃满。
+        if let siblings = try? fm.contentsOfDirectory(atPath:
+                rootfsPath.deletingLastPathComponent().path) {
+            let stranded = siblings.filter { $0.hasPrefix(".alpine-rootfs-broken-") }
+            if !stranded.isEmpty {
+                facts.append("遗留旧 rootfs \(stranded.count)份")
+                if verdict == nil {
+                    verdict = "有 \(stranded.count) 份删不掉的旧 rootfs 占着盘 → 重装时会自动重试清理"
+                }
+            }
+        }
+
+        // ── 3. meta.db（对应来源 2）──
+        let metaDBPath = rootfsPath.appendingPathComponent("meta.db").path
+        if !fm.fileExists(atPath: metaDBPath) {
+            facts.append("meta.db 不存在")
+            if verdict == nil { verdict = "meta.db 没了 → 需要重置重装" }
+        } else {
+            var db: OpaquePointer?
+            let rc = sqlite3_open_v2(metaDBPath, &db, SQLITE_OPEN_READWRITE, nil)
+            if rc != SQLITE_OK || db == nil {
+                facts.append("meta.db 打不开 rc=\(rc)")
+                if verdict == nil { verdict = "meta.db 打不开 → 需要重置重装" }
+                if let db { sqlite3_close(db) }
+            } else if let db {
+                sqlite3_busy_timeout(db, 3000)
+                defer { sqlite3_close(db) }
+
+                // 把内核 init 会做的事按顺序做一遍，谁先炸就是谁。
+                // 这是唯一能确定 init_fail 具体落在哪一条的办法。
+                func probe(_ label: String, _ sql: String, fatal: Bool = true) {
+                    var stmt: OpaquePointer?
+                    let r = sqlite3_prepare_v2(db, sql, -1, &stmt, nil)
+                    guard r == SQLITE_OK, let stmt else {
+                        let msg = String(cString: sqlite3_errmsg(db))
+                        facts.append("\(label):prepare rc=\(r)")
+                        if fatal && verdict == nil {
+                            verdict = "内核卡在「\(label)」→ 修库"
+                        }
+                        _ = msg
+                        return
+                    }
+                    defer { sqlite3_finalize(stmt) }
+                    let rc2 = sqlite3_step(stmt)
+                    if rc2 != SQLITE_ROW && rc2 != SQLITE_DONE {
+                        facts.append("\(label):step rc=\(rc2)")
+                        if fatal && verdict == nil {
+                            verdict = "内核卡在「\(label)」→ 修库"
+                        }
+                    }
+                }
+
+                // 前两条是硬 pragma（失败直接 init_fail，返回 -5）
+                probe("wal", "PRAGMA journal_mode=wal")
+                probe("foreign_keys", "PRAGMA foreign_keys=true")
+
+                // 迁移后无条件执行的两条（失败也是 init_fail）
+                probe("orphan-sweep",
+                      "DELETE FROM stats WHERE inode IN (SELECT inode FROM orphans) "
+                      + "AND NOT EXISTS (SELECT 1 FROM paths WHERE inode = stats.inode)")
+                probe("orphan-clear", "DELETE FROM orphans")
+
+                // 状态快照
+                var tables: [String] = []
+                var stmt: OpaquePointer?
+                if sqlite3_prepare_v2(db, "SELECT name FROM sqlite_master WHERE type='table'",
+                                      -1, &stmt, nil) == SQLITE_OK, let stmt {
+                    while sqlite3_step(stmt) == SQLITE_ROW {
+                        if let c = sqlite3_column_text(stmt, 0) {
+                            tables.append(String(cString: c))
+                        }
+                    }
+                    sqlite3_finalize(stmt)
+                }
+                let tblSet = Set(tables)
+                facts.append("表:\(tables.sorted().joined(separator: ","))")
+
+                var uv = -1
+                var uvStmt: OpaquePointer?
+                if sqlite3_prepare_v2(db, "PRAGMA user_version", -1, &uvStmt, nil) == SQLITE_OK,
+                   let uvStmt {
+                    if sqlite3_step(uvStmt) == SQLITE_ROW {
+                        uv = sqlite3_column_int(uvStmt, 0)
+                    }
+                    sqlite3_finalize(uvStmt)
+                }
+                facts.append("uv=\(uv)")
+
+                // 结构性缺件：这些是内核 init 里硬依赖的
+                if !tblSet.contains("orphans") {
+                    if verdict == nil { verdict = "缺 orphans 表 → 修库" }
+                }
+                if !tblSet.contains("paths") || !tblSet.contains("stats") {
+                    facts.append("核心表缺失")
+                    verdict = "paths/stats 表没了 → 只能重置重装"
+                }
+
+                // 残留的 WAL/SHM 也可能造成锁
+                for suffix in ["-wal", "-shm"] {
+                    let p = metaDBPath + suffix
+                    if let sz = (try? fm.attributesOfItem(atPath: p))?[.size] as? NSNumber {
+                        facts.append("\(suffix)=\(sz.intValue)B")
+                    }
+                }
+            }
+        }
+
+        var out = facts.joined(separator: " · ")
+        if let verdict {
+            out += "\n→ " + verdict
+        } else {
+            out += "\n→ 各项自检都过，-5 可能来自 fakefs_rebuild 期间的瞬时错误"
+        }
+        logger.error("[Rootfs] -5 诊断: \(out)")
+        return out
     }
 
     /// Reset (delete) the rootfs, forcing a fresh install on next launch

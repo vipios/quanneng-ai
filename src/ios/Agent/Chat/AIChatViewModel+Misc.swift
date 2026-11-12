@@ -46,26 +46,29 @@ extension AIChatViewModel {
                     let kernelElapsed = (CFAbsoluteTimeGetCurrent() - kernelStart) * 1000
                     logger.info("[KernelBoot] kernel boot call: \(String(format: "%.1f", kernelElapsed))ms")
 
-                    // [T-fakefs-rebuild-storm] -5 = -EIO，来自内核 fake_db_init
-                    // 走 init_fail 退出。能走到那里的路径有：
-                    //   · 两条 pragma（journal_mode / foreign_keys）失败
-                    //   · 迁移之后任一条 db_*_checked 失败 —— 其中最典型的是
-                    //     `select inode from orphans` 找不到表（迁移被跳过）
-                    //   · `update meta set db_inode` 失败
+                    // [T-fakefs-rebuild-storm] -5 = -EIO。它在 fakefs_mount 里
+                    // 有**三条**来源，前两轮只按其中一条修，所以一直打偏：
                     //
-                    // 同一段代码还有另一条**不会**返回 -5 的失败路径，别搞混：
-                    // fakefs_rebuild 里的 create table paths_old / stats_old 走
+                    //   1. `realfs_mount()` —— host 的 data/ 目录打不开
+                    //      （realpath / open(O_DIRECTORY) 失败，errno=EIO）
+                    //   2. `fake_db_init()` 的 init_fail —— meta.db 层面的
+                    //      SQLite 错误（pragma / 迁移 / prepare / db_inode 更新）
+                    //   3. `mount_root` 里 realpath(source) 失败
+                    //
+                    // `errno_map()` 含 ERRCASE(EIO)，所以 host 的 EIO 会原样
+                    // 变成 -5，三条最终长得一模一样。
+                    //
+                    // 同一段代码还有一条**不会**返回 -5 的失败路径，别搞混：
+                    // fakefs_rebuild 里 create table paths_old / stats_old 走
                     // EXEC 宏，失败时调 die()；iOS 上 die_handler 被换成
-                    // embedded_die_handler，只把 iSH 线程挂起、不让进程崩。
-                    // 那种情况表现为界面永远卡在「正在启用内核」，连错误都看不到。
+                    // embedded_die_handler，只把 iSH 线程永久挂起、不崩进程。
+                    // 那种情况表现为界面永远卡在「正在启用内核」，连错误码都看不到。
                     //
-                    // repairMetaDBIfNeeded() 三件事一起做（清残表 / 补 orphans /
-                    // 校准 db_inode）。上面 boot 前已经调用过一次，这里再调是
-                    // 兜底：万一第一条路径漏了（比如 rootfs 刚被别处改动），
-                    // 修完重试一次还失败就是别的原因（真损坏、没空间），
-                    // 再试只是浪费时间。
+                    // 下面 boot 前那次 repairMetaDBIfNeeded() 已经把 1.78 漏掉的
+                    // user_version 也一起修正了（构造内核迁移终态），所以这里
+                    // 返回 -5 基本只剩「库/目录真坏了」或「磁盘满」两种可能。
                     if err == -5 {
-                        logger.warning("[KernelBoot] boot 返回 -5（meta.db EIO）— 再修一次并重试")
+                        logger.warning("[KernelBoot] boot 返回 -5（EIO）— 先修库再重试一次")
                         // isBooted 只有在 boot 全程成功末尾才置 YES；-5 来自
                         // mount_root → fake_db_init，位置在 become_first_process
                         // 之前，所以内核还是「没启动」的干净状态，可以重来。
@@ -87,7 +90,14 @@ extension AIChatViewModel {
                     }
 
                     if err < 0 {
-                        kernelStatus = .failed("Kernel boot failed: \(err)")
+                        // -5 时把「凭什么 -5」查清楚并显示出来。两轮修复都
+                        // 因为看不到具体来源而打偏，这次让 App 自己说。
+                        if err == -5 {
+                            let diag = RootfsManager.shared.diagnoseKernelMountFailure()
+                            kernelStatus = .failed("Kernel boot failed: \(err)\n\(diag)")
+                        } else {
+                            kernelStatus = .failed("Kernel boot failed: \(err)")
+                        }
                         return
                     }
                     // Wire fakefs change events into the iCloud Sync v2
@@ -110,6 +120,73 @@ extension AIChatViewModel {
             } catch {
                 kernelStatus = .failed(error.localizedDescription)
                 logger.error("[KernelBoot] error: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    // MARK: - Kernel failure self-service  [T-kernel-fail-selfservice]
+
+    /// 失败界面「修复并重试」按钮的动作。
+    ///
+    /// 只做**库层面**的修复（不删 rootfs、不碰用户数据）：把 meta.db 拉回
+    /// 内核迁移终态，然后重新 boot 一次。适用于「目录结构完好、只是库不一致」。
+    ///
+    /// 之所以敢在同一个进程里重试：`-5` 来自 `mount_root → fake_db_init`，
+    /// 位置在 `become_first_process()` **之前** —— 内核还没成为 PID 1，
+    /// 进程状态是干净的。而 `become_first_process` 之后就不可能再重来了，
+    /// 那种情况 `bootWithRootPath` 会因为 `_isBooted` 直接返回 0，不会误进这里。
+    func repairAndRetryKernelBoot() {
+        guard !kernelRepairing else { return }
+        kernelRepairing = true
+
+        // Task 在这个 @MainActor 类里会继承主 actor 隔离，所以下面直接写
+        // self.xxx 即可，不需要 MainActor.run。与 ensureKernelBooted() 一致。
+        Task { [weak self] in
+            guard let self else { return }
+            let changed = RootfsManager.shared.repairMetaDBIfNeeded()
+            logger.warning("[KernelRepair] manual repair done (changed=\(changed))")
+
+            // 修完必须回到 notBooted 才能让 ensureKernelBooted 继续往下走。
+            // 注意 reset 的是**状态机**，不是 rootfs。
+            self.kernelRepairing = false
+            self.kernelStatus = .notBooted
+            self.ensureKernelBooted()
+        }
+    }
+
+    /// 失败界面「重置内核环境」按钮的动作。
+    ///
+    /// 删掉整个 rootfs 并标注需要重装。用 `keepUserData: true` 保住 `~`；
+    /// `/var/ai` 由 `installIfNeeded()` 的版本戳升级路径负责迁移
+    /// （走 `reinstallKeepingUserData()`）。
+    ///
+    /// **不会**当场重装：`reset()` 之后内核在本进程内无法重新 mount
+    /// （`become_first_process` 不可逆），必须重启 App。所以这里更新状态、
+    /// 给出明确提示，让用户自己冷启动。
+    func resetKernelEnvironment() {
+        guard !kernelRepairing else { return }
+        kernelRepairing = true
+
+        Task { [weak self] in
+            guard let self else { return }
+            var failure: String?
+            do {
+                try RootfsManager.shared.reset(keepUserData: true)
+            } catch {
+                failure = error.localizedDescription
+                logger.error("[KernelRepair] reset failed: \(error.localizedDescription)")
+            }
+
+            self.kernelRepairing = false
+            if let failure {
+                self.kernelStatus = .failed("重置失败：\(failure)")
+            } else {
+                // 这里故意写成「需要重启」而不是装作已经好了 ——
+                // 内核已经 boot 过的话本进程内不可能再挂载。
+                self.kernelStatus = .failed(
+                    "内核环境已重置。请完全关闭并重新打开 App，"
+                    + "下次启动会自动重新解压 rootfs（约 30 秒）。\n"
+                    + "你的 ~ 和 /var/ai 里的文件会保留。")
             }
         }
     }

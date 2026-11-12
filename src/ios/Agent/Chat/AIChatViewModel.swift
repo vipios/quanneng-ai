@@ -1243,6 +1243,11 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
     // Note: Stream throttle timestamps (lastTextDeltaFlush, lastFileWriteStreamUpdate,
     // lastToolInputStreamUpdate) are now local vars inside processStreamEvents().
     @Published var kernelStatus: KernelStatus = .notBooted
+    /// [T-kernel-fail-selfservice] 失败界面上「修复并重试 / 重置内核环境」
+    /// 正在执行时为 true，用来把按钮换成转圈、并防止连点。
+    /// 与 `kernelStatus` 分开：这两个动作**不是** boot 过程的一部分，
+    /// 塞进 KernelStatus 会让 `.booting` 的「正在启用内核」提示误出现。
+    @Published var kernelRepairing = false
     /// When enabled, agent responses and tool descriptions are spoken aloud.
     /// Initialized from the persisted "Read replies" preference so an already-on
     /// toggle drives streaming TTS for new chats.
