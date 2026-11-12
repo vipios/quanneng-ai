@@ -451,6 +451,16 @@ class RootfsManager {
         // Unzip using custom ZIP reader
         try unzipFile(at: zipURL, to: rootfsPath)
 
+        // [T-meta-sidecar-heal] 解压完先清伴生文件，再校准。
+        //
+        // 包本身不带 `-shm` / `-wal`（prepare 脚本打包时 `-x "*.db-shm"`），
+        // 所以这里通常删不到东西。但 `reinstallKeepingUserData()` 那条路是
+        // 在**旧库刚被删、新库刚落地**的瞬间跑过来的 —— 此刻路径上任何一份
+        // 上一代的 `-shm` 都会让这份全新的库直接 SQLITE_CORRUPT(11)。
+        // 这里刚解出来的库是全新的，路径上不可能存在属于它的 `-wal`，
+        // 所以无条件清是安全的。
+        purgeMetaDBSidecars(aggressive: true)
+
         // [T-fakefs-rebuild-storm] 解压完立刻校准 meta.db 的 db_inode。
         //
         // 这一步必须在 boot **之前**做，而且是解压之后的第一件事：
@@ -583,6 +593,521 @@ class RootfsManager {
                     + "\(String(format: "%.1f", elapsed))ms")
     }
 
+    // MARK: - [T-meta-sidecar-heal] meta.db 读不出来时的自救
+
+    /// `meta.db` 的伴生文件后缀。
+    ///
+    /// 三者都不是用户数据，但危险程度完全不同：
+    ///   · `-shm`     WAL 的共享内存索引，**纯派生**。删掉 SQLite 会从 `-wal`
+    ///                重建，`-wal` 为空时它就是一段彻底无主的旧索引
+    ///   · `-wal`     预写日志。**有内容的时候里面就是最近的提交**，
+    ///                删了等于丢掉最后一次 checkpoint 之后的 guest 写入
+    ///   · `-journal` 回滚日志，是未完成事务的撤销记录。删了等于让
+    ///                一个写了一半的事务「生效」，必然把库搞坏
+    ///
+    /// 注意别把 `-shm` 想得太能干：换个新进程、文件原样摆着，
+    /// SQLite 自己会从 `-wal` 重建索引，一份陈旧的 `-shm` **不会**
+    /// 单独造成 `rc=11`（本地实测过）。它只是「反正没用，顺手清掉」。
+    private static let metaDBSidecars = ["-shm", "-wal", "-journal"]
+
+    /// 删掉 `meta.db` 的伴生文件。
+    ///
+    /// 调用前提：**当前进程里没有别的连接打开这个库**。我们只在 boot 之前
+    /// （`repairMetaDBIfNeeded`）和解压刚结束、内核还没起来的时候调，
+    /// 这个前提成立。
+    ///
+    /// - Parameter aggressive: `false` 走日常安全策略 —— `-shm` 一律删，
+    ///   `-wal` 只删空文件，`-journal` 不碰；`true` 表示已经确认库读不出来、
+    ///   准备整份替换，三个全删。
+    /// - Returns: 删掉的 `后缀(字节数)`，只用于日志。
+    @discardableResult
+    private func purgeMetaDBSidecars(aggressive: Bool) -> [String] {
+        // 内核已经 booted 时，它的 sqlite 连接就挂在这个库上，
+        // 这时候删伴生文件等于跟一个活着的连接抢文件。直接放弃 ——
+        // 这些文件在下次冷启动（内核一定没起来）时再治，那时才是安全的。
+        if ISHKernel.shared.isBooted {
+            logger.warning("[Rootfs] 内核已 booted，跳过清 meta.db 伴生文件")
+            return []
+        }
+        let fm = FileManager.default
+        let base = rootfsPath.appendingPathComponent("meta.db").path
+        var removed: [String] = []
+        for suffix in Self.metaDBSidecars {
+            let path = base + suffix
+            guard let size = (try? fm.attributesOfItem(atPath: path))?[.size] as? NSNumber else {
+                continue
+            }
+            // 保守策略下只放过「有内容的 -wal」和「-journal」。
+            let keep = !aggressive && suffix != "-shm" && size.intValue > 0
+            if keep { continue }
+            if (try? fm.removeItem(atPath: path)) != nil {
+                removed.append("\(suffix)(\(size.intValue)B)")
+            }
+        }
+        if !removed.isEmpty {
+            logger.warning("[Rootfs] 清掉 meta.db 伴生文件: \(removed.joined(separator: " "))")
+        }
+        return removed
+    }
+
+    /// 内核 `fake_db_init()` 里那 17 条 `PREPARE_OR_FAIL` 的**原文**。
+    ///
+    /// 探针要复刻的是「内核挂载时到底会做什么」，所以这里一个字都不能改，
+    /// 也不能「挑几条代表性的」。抄自 `fs/fake-db.c:396-413`，
+    /// 只去掉了 C 里的换行拼接。
+    ///
+    /// 为什么必须逐条 prepare 而不是随便读个 pragma：`sqlite3_prepare_v2`
+    /// 在编译阶段就要把表名/列名在 `sqlite_master` 里解析出来，
+    /// 而「表被删了」「schema 根页被清零」这两种坏法**只有走 schema 才会暴露**。
+    /// `PRAGMA user_version` 读的是第 1 页头部的固定偏移，根本不碰 schema ——
+    /// 1.85 之前拿它当唯一判据，结果库烂成一半还是判「好的」，
+    /// 自救直接跳过，冷启动继续 `-5`。
+    private static let kernelPrepareStatements: [String] = [
+        "begin deferred",
+        "begin immediate",
+        "commit",
+        "rollback",
+        "select inode from paths where path = ?",
+        "select inode, stat from stats natural join paths where path = ?",
+        "insert into stats (stat) values (?)",
+        "insert or replace into paths values (?, last_insert_rowid())",
+        "select stat from stats where inode = ?",
+        "update stats set stat = ? where inode = ?",
+        "insert or replace into paths (path, inode) values (?, ?)",
+        "delete from paths where path = ?",
+        "update or replace paths set path = change_prefix(path, ?, ?) "
+            + "where (path >= ? and path < ?) or path = ?",
+        "select path from paths where inode = ?",
+        "delete from stats where inode = ? "
+            + "and not exists (select 1 from paths where inode = stats.inode)",
+        "insert or ignore into orphans (inode) values (?)",
+        "delete from orphans where inode = ?",
+    ]
+
+    /// 试读一次 `meta.db`：打开 → 读 `user_version` → `quick_check` → 17 条 prepare。
+    ///
+    /// 四步的职责各不相同，少一步就会漏掉一类坏法：
+    ///   1. 打开                 文件在不在、权限对不对、是不是被别的进程锁死
+    ///   2. `PRAGMA user_version` 回报版本号（**只用来回报，不单独当判据**）
+    ///   3. `PRAGMA quick_check`  把每个 btree 页真的读一遍 → 抓物理损坏
+    ///   4. 17 条 prepare         逐条对齐内核对 schema 的要求 → 抓「表/列没了」
+    ///
+    /// 3 和 4 不能互相替代：`quick_check` 只查 btree 结构，一张**整表不存在**
+    /// 的库在它眼里完全健康；反过来，表结构齐全但索引页被清零，
+    /// 17 条 prepare 也照样全过（prepare 只读 schema，不读数据页）。
+    ///
+    /// 全部只读：`quick_check` 和 `prepare` 都不写任何字节。**不 step 那 13 条
+    /// 带写操作的语句** —— 探针绝不能修改现场。
+    private func probeMetaDBReadable() -> (ok: Bool, rc: Int32, uv: Int32, message: String) {
+        let metaDBPath = rootfsPath.appendingPathComponent("meta.db").path
+        var handle: OpaquePointer?
+        let openRC = sqlite3_open_v2(metaDBPath, &handle, SQLITE_OPEN_READWRITE, nil)
+        guard openRC == SQLITE_OK, let db = handle else {
+            if let handle { sqlite3_close(handle) }
+            return (false, openRC, -1, "open rc=\(openRC)")
+        }
+        defer { sqlite3_close(db) }
+        sqlite3_busy_timeout(db, 2000)
+
+        /// 把一条语句 prepare 出来、立刻 finalize。返回 0 表示这一条内核也能过。
+        func prepareOnly(_ sql: String) -> (rc: Int32, err: String) {
+            var stmt: OpaquePointer?
+            let rc = sqlite3_prepare_v2(db, sql, -1, &stmt, nil)
+            if let stmt { sqlite3_finalize(stmt) }
+            return rc == SQLITE_OK ? (0, "") : (rc, String(cString: sqlite3_errmsg(db)))
+        }
+
+        // ① user_version —— 单独失败就是硬失败（连第 1 页都读不出来）。
+        var uv: Int32 = -1
+        do {
+            var stmt: OpaquePointer?
+            let rc = sqlite3_prepare_v2(db, "PRAGMA user_version", -1, &stmt, nil)
+            guard rc == SQLITE_OK, let stmt else {
+                if let stmt { sqlite3_finalize(stmt) }
+                return (false, rc, -1, "uv:prepare rc=\(rc) \(String(cString: sqlite3_errmsg(db)))")
+            }
+            defer { sqlite3_finalize(stmt) }
+            let stepRC = sqlite3_step(stmt)
+            guard stepRC == SQLITE_ROW else {
+                return (false, stepRC, -1, "uv:step rc=\(stepRC) \(String(cString: sqlite3_errmsg(db)))")
+            }
+            uv = sqlite3_column_int(stmt, 0)
+        }
+
+        // ② quick_check —— 物理结构
+        if let bad = quickCheckFailure(db) {
+            return (false, bad.rc, uv, "quick_check \(bad.text)")
+        }
+
+        // ③ 17 条 prepare —— 内核挂载时做的就是这个
+        for sql in Self.kernelPrepareStatements {
+            let r = prepareOnly(sql)
+            if r.rc != 0 {
+                // 只截前 32 个字符：整条 SQL 会把这行日志撑爆。
+                return (false, r.rc, uv, "prepare[\(sql.prefix(32))] rc=\(r.rc) \(r.err)")
+            }
+        }
+        return (true, 0, uv, "ok")
+    }
+
+    /// 跑一遍 `PRAGMA quick_check`：正常返回 nil，坏了返回 (错误码, 描述)。
+    ///
+    /// 为什么用 `quick_check` 而不是 `integrity_check`：后者会把**每一行**
+    /// 和它对应的索引项逐条比对，5MB 的库要几百毫秒，放在启动路径上太贵。
+    /// `quick_check` 只走 btree 结构本身，本地实测 5676 行的库 ~8ms，
+    /// 抓的正是我们要抓的那类坏法（整页被清零 / 页链断掉 / 页头垃圾）。
+    ///
+    /// 注意返回形态：SQLite 发现损坏时**不一定**回一个错误码，
+    /// 它更常见的做法是「正常返回若干行，每行是一句人话描述」。
+    /// 所以判据是「读出来的行恰好只有一行 `ok`」，而不是「有没有抛错」。
+    private func quickCheckFailure(_ db: OpaquePointer) -> (rc: Int32, text: String)? {
+        var stmt: OpaquePointer?
+        let rc = sqlite3_prepare_v2(db, "PRAGMA quick_check", -1, &stmt, nil)
+        guard rc == SQLITE_OK, let stmt else {
+            return (rc, "prepare rc=\(rc) \(String(cString: sqlite3_errmsg(db)))")
+        }
+        defer { sqlite3_finalize(stmt) }
+        var rows: [String] = []
+        while true {
+            let stepRC = sqlite3_step(stmt)
+            if stepRC == SQLITE_DONE { break }
+            guard stepRC == SQLITE_ROW else {
+                return (stepRC, "step rc=\(stepRC) \(String(cString: sqlite3_errmsg(db)))")
+            }
+            if let cstr = sqlite3_column_text(stmt, 0) {
+                // quick_check 的描述里带换行（"*** in database main ***\nTree 2 page 2: ..."）。
+                // 这一行最后要塞进单行诊断串，换行会把 UI 撑成好几段，直接压平。
+                rows.append(String(cString: cstr)
+                    .replacingOccurrences(of: "\n", with: " ")
+                    .trimmingCharacters(in: .whitespacesAndNewlines))
+            }
+        }
+        if rows == ["ok"] { return nil }
+        // 最多带两行出来，够定位就行。
+        return (SQLITE_CORRUPT, rows.prefix(2).joined(separator: " / "))
+    }
+
+    /// 这个错误码是不是「库在文件层坏了」。
+    ///
+    /// 只用于**诊断措辞**（区分「读不出来」和「缺表」），不再用它决定要不要自救 ——
+    /// 决定自救的是 `isLockContention`，见 `repairMetaDBIfNeeded`。
+    ///
+    /// 三个：
+    ///   · 11 `SQLITE_CORRUPT`  库体/索引坏了（我们复现出来的就是这个）
+    ///   · 26 `SQLITE_NOTADB`   根本不是 SQLite 文件
+    ///   · 10 `SQLITE_IOERR`    读不出来（底层 I/O 错）
+    private static func isFileLevelCorruption(_ rc: Int32) -> Bool {
+        let primary = rc & 0xff
+        return primary == SQLITE_CORRUPT || primary == SQLITE_NOTADB || primary == SQLITE_IOERR
+    }
+
+    /// 这次失败是不是「别人正拿着这个库」——只有这种情况不能动文件。
+    ///
+    /// `SQLITE_BUSY(5)` / `SQLITE_LOCKED(6)`：另一个连接（可能是刚 boot 失败、
+    /// 连接还没回收的内核）正开着这个库。这时候删 `-shm`、挪 `meta.db`
+    /// 是**从活着的连接脚下抽地板**，能把一个本来只是锁竞争的库彻底搞坏。
+    ///
+    /// 反过来，**除了这两个以外的任何失败都应该去救**：
+    /// 早先的判据是白名单（只认 11/26/10），结果 0 字节的库、被清空 schema
+    /// 的库报的是 `SQLITE_ERROR(1) no such table`，白名单放不进去 ——
+    /// 自救直接被跳过，然后内核照样 `-5`。黑名单才是对的方向。
+    private static func isLockContention(_ rc: Int32) -> Bool {
+        let primary = rc & 0xff
+        return primary == SQLITE_BUSY || primary == SQLITE_LOCKED
+    }
+
+    /// 把 `meta.db` 头 100 字节里几个决定性字段读出来，拼成一行进诊断串。
+    ///
+    /// 为什么值得单独写：`rc=11` 只说「坏了」，不说**怎么坏的**，而不同
+    /// 坏法的处置完全不一样。头部这几个数字能直接分开：
+    ///   · `pg=` 0 或不是 2 的幂 → 头部被写坏（已经不是合法的 SQLite 文件）
+    ///   · 文件大小不是 `pg` 的整数倍 → **尾部有多余字节**，
+    ///     典型成因是「覆写文件时没截断」
+    ///   · `sz` 和 `pg*n` 对不上 → 页数被改过 / 文件被截断
+    ///   · `wv=2` → 这份库是 WAL 模式，会带 `-shm` / `-wal`
+    ///
+    /// 全程只读，不创建任何文件 —— 诊断自己不能改现场。
+    static func metaDBHeaderSummary(_ path: String) -> String {
+        guard let fh = FileHandle(forReadingAtPath: path) else { return "头:读不到" }
+        defer { try? fh.close() }
+        let head = fh.readData(ofLength: 100)
+        guard head.count >= 100 else { return "头:不足100B(\(head.count))" }
+
+        // 全部按**大端**读：SQLite 头里除 `-shm` 外都是 network byte order。
+        let base = head.startIndex
+        func be16(_ off: Int) -> UInt16 {
+            (UInt16(head[base + off]) << 8) | UInt16(head[base + off + 1])
+        }
+        func be32(_ off: Int) -> UInt32 {
+            (UInt32(head[base + off]) << 24)
+            | (UInt32(head[base + off + 1]) << 16)
+            | (UInt32(head[base + off + 2]) << 8)
+            | UInt32(head[base + off + 3])
+        }
+
+        // 头里 page_size 存成 16 位；写 1 表示 65536。
+        let rawPageSize = Int(be16(16))
+        let pageSize = rawPageSize == 1 ? 65536 : rawPageSize
+        let writeVersion = head[base + 18]
+        let readVersion = head[base + 19]
+        let pageCount = Int(be32(28))
+        let fileSize = ((try? FileManager.default.attributesOfItem(atPath: path))?
+            [.size] as? NSNumber)?.intValue ?? -1
+
+        var flags: [String] = []
+        if pageSize <= 0 || (pageSize & (pageSize - 1)) != 0 { flags.append("页大小非法") }
+        if fileSize >= 0, pageSize > 0, fileSize % pageSize != 0 { flags.append("非整除") }
+        if pageSize > 0, pageCount > 0, pageCount * pageSize != fileSize {
+            flags.append("页数×页大小≠文件大小")
+        }
+        let suffix = flags.isEmpty ? "" : " ⚠︎" + flags.joined(separator: "/")
+        return "头:pg=\(pageSize) n=\(pageCount) sz=\(fileSize) wv=\(writeVersion) rv=\(readVersion)\(suffix)"
+    }
+
+    /// 把 `data/` 下**新库里没有的**路径登记进 `meta.db`（单连接 + 单事务）。
+    ///
+    /// 为什么不复用 `registerSubtreeInMetaDB`：那个函数每个路径都
+    /// `sqlite3_open` / `close` 一次。用户数据目录（几千个文件）还能忍，
+    /// 整棵 rootfs（5 万+ 路径）就是几万次开关库，慢到不能放在启动路径上。
+    /// 这里一次 open、一个事务、两条预编译语句搞定。
+    ///
+    /// `onlyIfMissing` 为 true 时不覆盖已有行 —— 包里的库对 `/usr`、`/dev`
+    /// 这些出厂路径存着**正确的 uid/gid/rdev**，重扫时不能拿宿主的值盖掉。
+    ///
+    /// - Returns: 新登记了多少个路径。
+    @discardableResult
+    private func enrollTreeIntoMetaDB(onlyIfMissing: Bool) -> Int {
+        let fm = FileManager.default
+        let metaDBPath = rootfsPath.appendingPathComponent("meta.db").path
+        let dataPrefix = dataPath.standardized.path
+        guard fm.fileExists(atPath: dataPrefix) else {
+            logger.error("[Rootfs] enroll: data/ 不存在，跳过")
+            return 0
+        }
+
+        var db: OpaquePointer?
+        guard sqlite3_open_v2(metaDBPath, &db, SQLITE_OPEN_READWRITE, nil) == SQLITE_OK,
+              let db else { return 0 }
+        defer { sqlite3_close(db) }
+        sqlite3_busy_timeout(db, 5000)
+
+        var selStmt: OpaquePointer?
+        var insStat: OpaquePointer?
+        var insPath: OpaquePointer?
+        defer {
+            if let selStmt { sqlite3_finalize(selStmt) }
+            if let insStat { sqlite3_finalize(insStat) }
+            if let insPath { sqlite3_finalize(insPath) }
+        }
+        guard sqlite3_prepare_v2(db, "SELECT inode FROM paths WHERE path = ?",
+                                 -1, &selStmt, nil) == SQLITE_OK,
+              sqlite3_prepare_v2(db, "INSERT INTO stats (stat) VALUES (?)",
+                                 -1, &insStat, nil) == SQLITE_OK,
+              sqlite3_prepare_v2(db,
+                                 "INSERT OR REPLACE INTO paths (path, inode) "
+                                 + "VALUES (?, last_insert_rowid())",
+                                 -1, &insPath, nil) == SQLITE_OK else {
+            logger.error("[Rootfs] enroll: 预编译失败 — \(String(cString: sqlite3_errmsg(db)))")
+            return 0
+        }
+
+        sqlite3_exec(db, "BEGIN IMMEDIATE", nil, nil, nil)
+        var added = 0
+
+        // 登记一个宿主路径。linuxPath 已经算好，避免重复做字符串处理。
+        func enroll(hostPath: String, linuxPath: String) {
+            if onlyIfMissing, let selStmt {
+                bindPathBlob(selStmt, index: 1, path: linuxPath)
+                let hit = sqlite3_step(selStmt) == SQLITE_ROW
+                sqlite3_reset(selStmt)
+                if hit { return }
+            }
+
+            // 16 字节 = iSH 的 `struct ish_stat { mode, uid, gid, rdev }`
+            // （fs/fake-db.h，四个 uint32）。文件大小和 mtime 不在这里 ——
+            // fakefs 每次都 `fstatat` 真文件去取，所以 db 里没有它们是对的。
+            //
+            // mode 必须从真文件读：写死 0644/0755 会让恢复回来的脚本丢掉
+            // 可执行位（此前 `registerSubtreeInMetaDB` 就是这么干的）。
+            // 高 4 位是文件类型（S_IFREG/S_IFDIR/S_IFCHR...），必须保留。
+            //
+            // 用 `lstat` 而不是 `stat`：`stat` 会跟随符号链接，把链接本身
+            // 记成它指向的那个文件的类型，fakefs 就再也认不出这是链接了。
+            var st = stat()
+            let haveStat = lstat(hostPath, &st) == 0
+            let rawMode = haveStat ? UInt32(st.st_mode) : 0
+            let effectiveMode: UInt32 = haveStat ? (rawMode & 0o177777) : 0o100644
+            // rdev 只对字符/块设备有意义。普通文件留着 0 —— 而 Darwin 和
+            // Linux 的 dev_t 编码并不相同，所以只在我们真插新设备节点时
+            // 才有这点偏差，包里的设备节点不会被覆盖（onlyIfMissing）。
+            let isDevice = (rawMode & 0o170000) == 0o020000 || (rawMode & 0o170000) == 0o060000
+            let rdev: UInt32 = (haveStat && isDevice)
+                ? UInt32(truncatingIfNeeded: st.st_rdev) : 0
+
+            var statBytes: [UInt8] = Array(repeating: 0, count: 16)
+            for (i, value) in [effectiveMode, UInt32(0), UInt32(0), rdev].enumerated() {
+                let le = value.littleEndian
+                withUnsafeBytes(of: le) { src in
+                    for b in 0..<4 { statBytes[i * 4 + b] = src[b] }
+                }
+            }
+            guard let insStat, let insPath else { return }
+            sqlite3_bind_blob(insStat, 1, statBytes, Int32(statBytes.count), Self.SQLITE_TRANSIENT)
+            guard sqlite3_step(insStat) == SQLITE_DONE else {
+                sqlite3_reset(insStat)
+                return
+            }
+            sqlite3_reset(insStat)
+
+            bindPathBlob(insPath, index: 1, path: linuxPath)
+            if sqlite3_step(insPath) == SQLITE_DONE { added += 1 }
+            sqlite3_reset(insPath)
+        }
+
+        func linuxPath(for hostPath: String) -> String? {
+            if hostPath == dataPrefix { return "/" }
+            guard hostPath.hasPrefix(dataPrefix + "/") else { return nil }
+            return String(hostPath.dropFirst(dataPrefix.count))
+        }
+
+        guard let rootLinux = linuxPath(for: dataPrefix) else {
+            sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
+            return 0
+        }
+        enroll(hostPath: dataPrefix, linuxPath: rootLinux)
+
+        // 迭代而不是递归：rootfs 里有 10 层以上的目录，递归容易把栈吃光。
+        var stack: [String] = [dataPrefix]
+        while let dir = stack.popLast() {
+            guard let children = try? fm.contentsOfDirectory(atPath: dir) else { continue }
+            for name in children {
+                let child = dir + "/" + name
+                guard let linux = linuxPath(for: child) else { continue }
+                enroll(hostPath: child, linuxPath: linux)
+                var isDir: ObjCBool = false
+                if fm.fileExists(atPath: child, isDirectory: &isDir), isDir.boolValue {
+                    stack.append(child)
+                }
+            }
+        }
+
+        sqlite3_exec(db, "COMMIT", nil, nil, nil)
+        logger.info("[Rootfs] enroll: 登记 \(added) 个路径 (onlyIfMissing=\(onlyIfMissing))")
+        return added
+    }
+
+    /// 从 bundle 的 `alpine-rootfs.zip` 里只抽出 `meta.db` 一份，换掉已经读不出来的那份。
+    ///
+    /// [T-meta-sidecar-heal] 为什么可以「只换 db、不动 `data/`」：
+    ///   · `data/` 里是真实的文件内容，一个字节都不该动
+    ///   · `meta.db` 只存「路径 → inode」和 16 字节的 `struct ish_stat`
+    ///     （mode/uid/gid/rdev，见 iSH `fs/fake-db.h`）。文件大小、mtime
+    ///     都是 fakefs 每次 `fstatat` 从真文件读的 —— 所以库里**没有**
+    ///     任何重建不了的信息
+    ///   · 包里的库描述的是「出厂时的系统文件」，那正是我们要的基准；
+    ///     用户自己加的文件，最后由 `enrollTreeIntoMetaDB` 扫一遍补齐
+    ///
+    /// 这就是「重置内核环境」想达到的效果，但不用删 145MB 的树、
+    /// 不用重新解压 30 秒，用户数据全程原地不动。
+    ///
+    /// 步骤顺序不能调：先备份坏库（判错了还能捞），再解出新库并**验证**，
+    /// 验证过了才换，换完才清伴生文件。
+    ///
+    /// - Returns: 是否换成功（成功 = 新库可读且 `meta` 表恰好一行）。
+    @discardableResult
+    func restoreMetaDBFromBundle() -> Bool {
+        let fm = FileManager.default
+        guard let zipURL = Bundle.main.url(forResource: "alpine-rootfs", withExtension: "zip") else {
+            logger.error("[Rootfs] meta.db 自救失败：bundle 里没有 alpine-rootfs.zip")
+            return false
+        }
+        guard let archive = ZIPArchive(url: zipURL) else {
+            logger.error("[Rootfs] meta.db 自救失败：zip 打不开")
+            return false
+        }
+        let entryName = "alpine-rootfs/meta.db"
+        guard let entry = archive.entries.first(where: { $0.path == entryName }) else {
+            logger.error("[Rootfs] meta.db 自救失败：zip 里没有 \(entryName)")
+            return false
+        }
+
+        let metaDBURL = rootfsPath.appendingPathComponent("meta.db")
+        let stamp = Int(Date().timeIntervalSince1970)
+        let incomingURL = rootfsPath.appendingPathComponent("meta.db.incoming-\(stamp)")
+
+        // 1. 解到临时名，先验证，别把唯一一份能用的库覆盖掉。
+        do {
+            try extractEntryStreaming(entry, from: archive, to: incomingURL)
+        } catch {
+            logger.error("[Rootfs] meta.db 自救失败：解包出错 \(error.localizedDescription)")
+            try? fm.removeItem(at: incomingURL)
+            return false
+        }
+
+        // 验证：能打开、有 meta 表、meta 恰好一行。三条缺一不可 ——
+        // 缺了任何一条，换上去只会把「读不出来」换成「读出来但内核 die」。
+        var db: OpaquePointer?
+        var verified = false
+        if sqlite3_open_v2(incomingURL.path, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK, let db {
+            var stmt: OpaquePointer?
+            if sqlite3_prepare_v2(db, "SELECT count(*) FROM meta", -1, &stmt, nil) == SQLITE_OK,
+               let stmt {
+                if sqlite3_step(stmt) == SQLITE_ROW, sqlite3_column_int(stmt, 0) == 1 {
+                    verified = true
+                }
+                sqlite3_finalize(stmt)
+            }
+        }
+        if let db { sqlite3_close(db) }
+        guard verified else {
+            logger.error("[Rootfs] meta.db 自救失败：解出来的库自己就不合格")
+            try? fm.removeItem(at: incomingURL)
+            return false
+        }
+
+        // 2. 坏库挪到一边留档（大小 ≈1MB，留着不心疼）。
+        let corruptURL = rootfsPath.appendingPathComponent("meta.db.corrupt-\(stamp)")
+        if fm.fileExists(atPath: metaDBURL.path) {
+            try? fm.moveItem(at: metaDBURL, to: corruptURL)
+        }
+        try? fm.moveItem(at: incomingURL, to: metaDBURL)
+
+        // 3. 换完才清伴生文件 —— 旧 shm 属于旧库，留着必然配不上对。
+        purgeMetaDBSidecars(aggressive: true)
+
+        // 4. 把用户在 `data/` 里加的路径补登记进去（包里的库不认识它们）。
+        let added = enrollTreeIntoMetaDB(onlyIfMissing: true)
+
+        // 5. 只留最近两份坏库。
+        //
+        // 如果是「每次冷启动都坏」，自愈会一路重复，每份坏库 1~8MB，
+        // 攒几十份就能把用户的沙盒吃掉 —— 而这里恰恰是在磁盘可能
+        // 已经很紧张的时候跑的。留两份够查最近两次现场，多的一份不留。
+        pruneArchivedCorruptMetaDBs(keep: 2)
+
+        logger.warning("[Rootfs] meta.db 已从 bundle 还原（坏库留档 \(corruptURL.lastPathComponent)，"
+                       + "补登记 \(added) 个路径）")
+        return true
+    }
+
+    /// 只保留最近 `keep` 份 `meta.db.corrupt-<stamp>`，其余删掉。
+    ///
+    /// 文件名里的 stamp 是秒级时间戳，按名字倒序就是按时间倒序，
+    /// 不用去读每个文件的创建时间（那还得处理时区/精度）。
+    private func pruneArchivedCorruptMetaDBs(keep: Int) {
+        let fm = FileManager.default
+        guard let names = try? fm.contentsOfDirectory(atPath: rootfsPath.path) else { return }
+        let archives = names
+            .filter { $0.hasPrefix("meta.db.corrupt-") }
+            .sorted(by: >)          // 降序：新的在前
+        guard archives.count > keep else { return }
+        for name in archives.dropFirst(keep) {
+            if (try? fm.removeItem(atPath: rootfsPath.appendingPathComponent(name).path)) != nil {
+                logger.info("[Rootfs] 清掉旧坏库留档 \(name)")
+            }
+        }
+    }
+
     /// 把 `meta.db` 幂等地**直接构造成「内核迁移全部跑完」的终态**。
     ///
     /// [T-meta-terminal-state] 为什么不再「零散补漏」——
@@ -608,6 +1133,65 @@ class RootfsManager {
     func repairMetaDBIfNeeded() -> Bool {
         let metaDBPath = rootfsPath.appendingPathComponent("meta.db").path
         guard FileManager.default.fileExists(atPath: metaDBPath) else { return false }
+
+        // ── 0. [T-meta-sidecar-heal] 打开之前的自救 ──
+        //
+        // 为什么必须在**打开之前**做：库里一旦被打开，SQLite 就会按它自己的
+        // 判断去读/重建伴生文件，那时再删就是跟一个活着的连接抢文件。
+        //
+        // 关于设备上那串 `wal:prepare rc=11 / 表为空 / uv=-1`：
+        // 11 是 `SQLITE_CORRUPT`，是**文件层损坏**，不是缺表。
+        // 有一点必须说清楚 —— 我一度以为是「旧 `-shm` 残留」造成的，
+        // 但那只能在**同一进程里、库被换过**的情况下复现出来；
+        // 换个新进程、文件原样放着，SQLite 自己会从 `-wal` 重建索引，
+        // 根本不会报 11。所以设备上的具体成因**还没坐实**。
+        //
+        // 这一段因此不押注在某一个成因上，改成三级：
+        //   ① 清掉一定没用的伴生文件（无损，顺手）
+        //   ② 还是读不出来 → 清光三个伴生文件再读（仍是无损的，只是更激进）
+        //   ③ 还读不出来 → 说明坏在库体本身，从 bundle 换一份（见
+        //      restoreMetaDBFromBundle，用户数据一个字节不动）
+        // 三级都过不去才放弃。这三条对「怎么坏的」不敏感，这才是重点。
+        purgeMetaDBSidecars(aggressive: false)
+
+        // 只要「换过库」或「改过库」就让调用方重试 boot。
+        // 早先只看 `changed`（uv / db_inode 有没有变），换库这条路没算进去 ——
+        // 换完之后 uv 本来就是 4，边界上千一失手就是「库修好了但没重试」。
+        var healed = false
+
+        var attempt = probeMetaDBReadable()
+        if !attempt.ok {
+            logger.error("[Rootfs] repairMetaDB: 预检没通过（\(attempt.message)）")
+        }
+        if !attempt.ok, !Self.isLockContention(attempt.rc) {
+            // 走到这里说明「库我们读不出来」，而**不是**别人正拿着它。
+            // 除了锁竞争，其余失败都按「这份库不能用了」处理 —— 包括
+            // 11/26/10（物理损坏）、1（`no such table`，0 字节库或 schema 被清空）、
+            // 14（打不开）。理由：这些情况下内核一定 mount 不上，
+            // 而换一份 db 是**无损**的（`data/` 一个字节不动，路径最后补登记）。
+            // 反过来放行的代价是用户看到 `-5` 然后被赶去点「重置」删掉 145MB。
+            //
+            // 顺序：先清伴生文件（无损、能治「旧索引配不上新库」），
+            // 还不行才换库体（也够快，< 1s）。
+            purgeMetaDBSidecars(aggressive: true)
+            attempt = probeMetaDBReadable()
+            logger.warning("[Rootfs] repairMetaDB: 清伴生文件后重读 → "
+                           + (attempt.ok ? "OK uv=\(attempt.uv)" : attempt.message))
+            if !attempt.ok, restoreMetaDBFromBundle() {
+                healed = true
+                attempt = probeMetaDBReadable()
+                logger.warning("[Rootfs] repairMetaDB: 从 bundle 还原后重读 → "
+                               + (attempt.ok ? "OK uv=\(attempt.uv)" : attempt.message))
+            }
+            if !attempt.ok {
+                logger.error("[Rootfs] repairMetaDB: meta.db 救不回来，放弃（\(attempt.message)）")
+                return false
+            }
+        } else if !attempt.ok {
+            // 锁竞争。**一个文件都不动** —— 从活着的连接脚下抽地板
+            // 才是真能把库搞坏的做法。交给下面原来的逻辑尽力而为。
+            logger.warning("[Rootfs] repairMetaDB: 库被占用（rc=\(attempt.rc)），只等不动文件")
+        }
 
         var db: OpaquePointer?
         guard sqlite3_open_v2(metaDBPath, &db, SQLITE_OPEN_READWRITE, nil) == SQLITE_OK,
@@ -722,21 +1306,29 @@ class RootfsManager {
             }
         }
 
-        // 顺手确认库本身没坏。integrity_check 返回 "ok" 才算过。
-        var stmt: OpaquePointer?
-        if sqlite3_prepare_v2(db, "PRAGMA integrity_check", -1, &stmt, nil) == SQLITE_OK, let stmt {
-            defer { sqlite3_finalize(stmt) }
-            if sqlite3_step(stmt) == SQLITE_ROW,
-               let cstr = sqlite3_column_text(stmt, 0) {
-                let verdict = String(cString: cstr)
-                if verdict != "ok" {
-                    logger.error("[Rootfs] repairMetaDB: integrity_check 报 \(verdict)")
-                }
-            }
+        // 顺手确认修完之后库确实可读。
+        //
+        // 这里原来用 `PRAGMA integrity_check`，改成 `quick_check` 有两个原因：
+        //   · 开销：integrity_check 会把每行和它的索引项逐条比对，
+        //     5MB 的库要几百毫秒，而这段跑在**每次启动**的 boot 之前
+        //   · 判据重复：物理结构在上面 `probeMetaDBReadable` 里已经查过了，
+        //     这里只是复查「刚才那几条 DDL 没把库写坏」，quick_check 足够
+        if let bad = quickCheckFailure(db) {
+            logger.error("[Rootfs] repairMetaDB: 修完 quick_check 报 \(bad.text)")
         }
 
-        logger.info("[Rootfs] repairMetaDB done (changed=\(changed))")
-        return changed
+        // 把 WAL 落盘并清空。
+        //
+        // 目的是让「内核接下来看到的那份库」是一个没有待重放帧的确定状态：
+        // 上面这些 DDL 都写进了 `-wal`，内核 mount 时要先做一次 WAL 恢复
+        // 才轮得到 `PRAGMA journal_mode=wal` —— 而设备上炸的正是那一条。
+        // 少一步恢复就少一个失败点。此刻内核一定没起来，独占是安全的。
+        if sqlite3_exec(db, "PRAGMA wal_checkpoint(TRUNCATE)", nil, nil, nil) == SQLITE_OK {
+            logger.info("[Rootfs] repairMetaDB: WAL 已 checkpoint(TRUNCATE)")
+        }
+
+        logger.info("[Rootfs] repairMetaDB done (changed=\(changed) healed=\(healed))")
+        return changed || healed
     }
 
     /// 内核 mount 返回 -5（-EIO）时，把「凭什么 -5」查清楚。
@@ -818,6 +1410,23 @@ class RootfsManager {
             facts.append("meta.db 不存在")
             if verdict == nil { verdict = "meta.db 没了 → 需要重置重装" }
         } else {
+            // ★ 量文件、读头，全部在**打开之前**做。
+            //
+            // 打开这个库本身就会创建/删除 `-wal`、`-shm`，打开之后再量
+            // 量到的是「诊断自己刚弄出来的东西」，不是原始现场。
+            // 之前那一版就是在 probe 之后量的，所以永远显示
+            // `-wal=0B -shm=32768B` —— 那两条其实是 `PRAGMA journal_mode=wal`
+            // 现场建出来的，白白误导了两轮。
+            var sidecarFacts: [String] = []
+            for suffix in ["-wal", "-shm", "-journal"] {
+                let p = metaDBPath + suffix
+                if let sz = (try? fm.attributesOfItem(atPath: p))?[.size] as? NSNumber {
+                    sidecarFacts.append("\(suffix)=\(sz.intValue)B")
+                }
+            }
+            facts.append("伴生:" + (sidecarFacts.isEmpty ? "无" : sidecarFacts.joined(separator: ",")))
+            facts.append(Self.metaDBHeaderSummary(metaDBPath))
+
             var db: OpaquePointer?
             let rc = sqlite3_open_v2(metaDBPath, &db, SQLITE_OPEN_READWRITE, nil)
             if rc != SQLITE_OK || db == nil {
@@ -830,25 +1439,27 @@ class RootfsManager {
 
                 // 把内核 init 会做的事按顺序做一遍，谁先炸就是谁。
                 // 这是唯一能确定 init_fail 具体落在哪一条的办法。
+                //
+                // ★ 只 prepare，**不 step**。
+                // 这四条里有两条是写操作（`DELETE FROM orphans` / orphan-sweep），
+                // 一条会改持久化状态（`PRAGMA journal_mode=wal`）。
+                // 早先的版本对它们 `sqlite3_step()` 了，等于「诊断的时候
+                // 顺手把用户的库改一遍」—— 诊断绝不能有副作用，
+                // 尤其是库本来就坏着的时候，谁也不知道这一 step 会写坏什么。
+                // 内核那 17 条也是 `sqlite3_prepare_v2` 就判失败，
+                // 所以只看 prepare 的 rc 与内核的判据完全一致。
+                var fileLevelBad = false
                 func probe(_ label: String, _ sql: String, fatal: Bool = true) {
                     var stmt: OpaquePointer?
                     let r = sqlite3_prepare_v2(db, sql, -1, &stmt, nil)
-                    guard r == SQLITE_OK, let stmt else {
-                        let msg = String(cString: sqlite3_errmsg(db))
+                    if let stmt { sqlite3_finalize(stmt) }
+                    if Self.isFileLevelCorruption(r) { fileLevelBad = true }
+                    guard r == SQLITE_OK else {
                         facts.append("\(label):prepare rc=\(r)")
                         if fatal && verdict == nil {
                             verdict = "内核卡在「\(label)」→ 修库"
                         }
-                        _ = msg
                         return
-                    }
-                    defer { sqlite3_finalize(stmt) }
-                    let rc2 = sqlite3_step(stmt)
-                    if rc2 != SQLITE_ROW && rc2 != SQLITE_DONE {
-                        facts.append("\(label):step rc=\(rc2)")
-                        if fatal && verdict == nil {
-                            verdict = "内核卡在「\(label)」→ 修库"
-                        }
                     }
                 }
 
@@ -862,6 +1473,19 @@ class RootfsManager {
                       + "AND NOT EXISTS (SELECT 1 FROM paths WHERE inode = stats.inode)")
                 probe("orphan-clear", "DELETE FROM orphans")
 
+                // ★ 物理结构：坏在哪一页、怎么坏的，只有 quick_check 说得清。
+                // 上一条设备报告只给了「wal:prepare rc=11 + 核心表缺失」，
+                // 这三个字不足以区分「表被删」和「页被清零」，只能靠猜。
+                if let bad = quickCheckFailure(db) {
+                    fileLevelBad = true
+                    facts.append("quick_check:\(String(bad.text.prefix(160)))")
+                    if verdict == nil {
+                        verdict = "meta.db 物理损坏（见 quick_check）→ 下次启动会自动从包内还原，用户数据不动"
+                    }
+                } else {
+                    facts.append("quick_check:ok")
+                }
+
                 // 状态快照
                 var tables: [String] = []
                 var stmt: OpaquePointer?
@@ -873,9 +1497,33 @@ class RootfsManager {
                         }
                     }
                     sqlite3_finalize(stmt)
+                } else {
+                    if Self.isFileLevelCorruption(sqlite3_errcode(db)) { fileLevelBad = true }
+                    facts.append("sqlite_master 读不出来")
                 }
                 let tblSet = Set(tables)
                 facts.append("表:\(tables.sorted().joined(separator: ","))")
+
+                // 四张表各有多少行 —— 真读一遍数据页。
+                // 「prepare 过了但 step 炸」这种坏法，只有这一条能抓住。
+                var rowCounts: [String] = []
+                for t in ["meta", "paths", "stats", "orphans"] where tblSet.contains(t) {
+                    var cs: OpaquePointer?
+                    guard sqlite3_prepare_v2(db, "SELECT count(*) FROM \(t)", -1, &cs, nil)
+                            == SQLITE_OK, let cs else {
+                        rowCounts.append("\(t)=?")
+                        continue
+                    }
+                    let sr = sqlite3_step(cs)
+                    rowCounts.append(sr == SQLITE_ROW
+                                     ? "\(t)=\(sqlite3_column_int(cs, 0))"
+                                     : "\(t)=r\(sr)")
+                    if Self.isFileLevelCorruption(sr) { fileLevelBad = true }
+                    sqlite3_finalize(cs)
+                }
+                if !rowCounts.isEmpty {
+                    facts.append("行数:" + rowCounts.joined(separator: ","))
+                }
 
                 // 同 repairMetaDBIfNeeded：sqlite3_column_int 返回 Int32
                 var uv: Int32 = -1
@@ -895,15 +1543,21 @@ class RootfsManager {
                 }
                 if !tblSet.contains("paths") || !tblSet.contains("stats") {
                     facts.append("核心表缺失")
-                    verdict = "paths/stats 表没了 → 只能重置重装"
-                }
-
-                // 残留的 WAL/SHM 也可能造成锁
-                for suffix in ["-wal", "-shm"] {
-                    let p = metaDBPath + suffix
-                    if let sz = (try? fm.attributesOfItem(atPath: p))?[.size] as? NSNumber {
-                        facts.append("\(suffix)=\(sz.intValue)B")
+                    // 「表被删了」和「整个文件读不出来」在界面上看起来一样，
+                    // 但 1.86 起两者的处置**已经统一**：都不需要重装。
+                    // 缺表 → 换一份包里的 db + 重扫 data/ 补登记；
+                    // 读不出来 → 同上。用户数据（data/）全程一个字节不动。
+                    // 所以这里别再把人往「重置内核环境」上赶 ——
+                    // 那条路会删掉整棵 145MB 的树，代价大得多。
+                    if verdict == nil {
+                        verdict = fileLevelBad
+                            ? "meta.db 物理损坏 → 下次启动会自动从包内还原这份 db，用户数据不动，**不用点重置**"
+                            : "核心表缺失 → 下次启动会自动从包内还原这份 db 并重扫 data/ 补登记，用户数据不动，**不用点重置**"
                     }
+                }
+                // 库读不出来但表名还列得出来（schema 在、数据页烂）
+                if verdict == nil, fileLevelBad {
+                    verdict = "meta.db 读不出来 → 下次启动会自动从包内还原，用户数据不动，**不用点重置**"
                 }
             }
         }
@@ -1136,11 +1790,38 @@ class RootfsManager {
               let db else { return }
         defer { sqlite3_close(db) }
 
-        let effectiveMode: UInt32 = mode ?? (isDirectory ? 0o040755 : 0o100644)
+        // [T-meta-sidecar-heal] mode / rdev 从真文件读，别再写死。
+        //
+        // 原来这里是 `mode ?? (isDirectory ? 040755 : 0100644)`：只要是
+        // 「恢复/登记一个已存在的文件」，权限一律被写成 0644 ——
+        // 用户 `~` 下的脚本**全部丢掉可执行位**，`chmod +x` 过的安装脚本
+        // 变成普通文本，`bash foo.sh` 报 Permission denied。
+        // 设备路径 rdev 被写成 0 也一样：`/dev/null` 会变成普通文件。
+        //
+        // `struct ish_stat` 就 4 个 uint32（mode/uid/gid/rdev），
+        // 文件大小和 mtime 不在这里 —— fakefs 每次 `fstatat` 真文件去取。
         var statBytes: [UInt8] = Array(repeating: 0, count: 16)
-        let leMode = effectiveMode.littleEndian
-        withUnsafeBytes(of: leMode) { src in
-            for i in 0..<4 { statBytes[i] = src[i] }
+        var effectiveMode: UInt32 = mode ?? (isDirectory ? 0o040755 : 0o100644)
+        var effectiveRdev: UInt32 = 0
+        if mode == nil {
+            let hostPath = dataPath.appendingPathComponent(
+                linuxPath.hasPrefix("/") ? String(linuxPath.dropFirst()) : linuxPath).path
+            var st = stat()
+            // lstat：同上 — 符号链接要保留成链接，不能被跟随掉。
+            if lstat(hostPath, &st) == 0 {
+                // 高 4 位是文件类型（S_IFREG/S_IFDIR/S_IFCHR...），必须保留。
+                effectiveMode = UInt32(st.st_mode) & 0o177777
+                let typeBits = UInt32(st.st_mode) & 0o170000
+                if typeBits == 0o020000 || typeBits == 0o060000 {
+                    effectiveRdev = UInt32(truncatingIfNeeded: st.st_rdev)
+                }
+            }
+        }
+        for (i, value) in [effectiveMode, UInt32(0), UInt32(0), effectiveRdev].enumerated() {
+            let le = value.littleEndian
+            withUnsafeBytes(of: le) { src in
+                for b in 0..<4 { statBytes[i * 4 + b] = src[b] }
+            }
         }
 
         // If the path already exists, update its stat row in place so we can
@@ -1383,6 +2064,19 @@ class RootfsManager {
                 NSLocalizedDescriptionKey: "创建文件失败：\(destination.lastPathComponent)"
             ])
         }
+
+        // [T-meta-sidecar-heal] 先把长度截成 0 再写。
+        //
+        // `FileHandle(forWritingAtPath:)` 是**从偏移 0 覆写、不截断**：
+        // 如果目标文件本来比要写的内容长，尾部那段旧字节会原样留下来。
+        // 对一个普通 .so 来说这是「尾部多几 KB 垃圾」，而对 `meta.db`
+        // 来说就是「SQLite 头说 284 页、文件却有 285 页」——
+        // 下一步 `sqlite3_open` 直接 SQLITE_CORRUPT(11)，
+        // 内核 `fake_db_init` 拿它挂载失败，用户看到的就是 `-5`。
+        //
+        // 正常路径上目标文件是不存在的（先整棵删树再解压），所以这条
+        // 截断平时什么都不做；它的作用是堵住「目标已存在」这条边路。
+        try? out.truncate(atOffset: 0)
 
         // 写入失败时要删掉半截文件再抛错。
         // 不删的话 rootfs 里会留一个大小不对的 .so / 可执行文件 ——
