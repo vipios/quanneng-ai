@@ -295,8 +295,12 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: deps/resources/alpine-rootfs.zip
-          key: rootfs-alpine-v5-slim
-      
+          # key 里带 STAMP_SCHEMA：构建脚本只要改动「会进 zip 的内容」就必须升，
+          # 否则命中旧缓存 → 脚本整个不跑 → 新加的版本戳写不进去 →
+          # 设备端 `bundleRootfsStamp()` 返回 nil → 版本检查被静默跳过。
+          # v6：新增 data/etc/quanneng-rootfs-version 版本戳（1.73 修复）
+          key: rootfs-alpine-v6-stamp
+
       # ── 4. 构建原生依赖 ──
       # 顺序有依赖关系，不能并行也不能调换：
       #   LAME  →  FFmpeg 要用它编 libmp3lame，没有就静默丢 MP3
@@ -395,12 +399,32 @@ jobs:
         run: |
           # rootfs 的 key 不带 hash（Alpine 版本写死在脚本里），
           # 但缓存里可能只有半份，所以还要检查 zip 是否真存在。
+          #
+          # [STAMP-GUARD] 还要检查 zip 里带不带版本戳 ——
+          # App 端 `RootfsManager.bundleRootfsStamp()` 读的就是
+          # `alpine-rootfs/data/etc/quanneng-rootfs-version`。
+          # 没有这个文件，版本检查会静默返回 true（当成一致），
+          # 老用户永远不会重装 rootfs，dpkg 缺失这种问题修不掉。
+          # 所以「缓存命中但没有戳」必须当成未命中，强制重建。
           if [ -f deps/resources/alpine-rootfs.zip ]; then
-            echo "rootfs 已命中缓存，跳过"
-            ls -la deps/resources/alpine-rootfs.zip
+            if unzip -l deps/resources/alpine-rootfs.zip \
+                 | grep -q 'alpine-rootfs/data/etc/quanneng-rootfs-version'; then
+              echo "rootfs 已命中缓存且带版本戳，跳过"
+              ls -la deps/resources/alpine-rootfs.zip
+            else
+              echo "::warning::缓存的 rootfs 里没有版本戳，作废并重建"
+              rm -f deps/resources/alpine-rootfs.zip
+              ./deps/prepare_alpine_rootfs.sh
+            fi
           else
             ./deps/prepare_alpine_rootfs.sh
           fi
+
+          # 重建后必须确认戳真的写进去了，否则这一轮的 ipa 白出。
+          echo "── rootfs 版本戳 ──"
+          unzip -p deps/resources/alpine-rootfs.zip \
+            alpine-rootfs/data/etc/quanneng-rootfs-version \
+            | sed 's/^/  /' || echo "  (没读到)"
 
       - name: Save rootfs cache
         if: success()
@@ -408,7 +432,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: deps/resources/alpine-rootfs.zip
-          key: rootfs-alpine-v5-slim
+          key: rootfs-alpine-v6-stamp
 
       - name: Build rclone
         if: steps.c_rclone.outputs.cache-hit != 'true'
